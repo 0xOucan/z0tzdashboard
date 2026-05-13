@@ -24,6 +24,7 @@ import { fmtUsdc, fmtEth, fmtUsd, fmtCompact } from "@/lib/format";
 import { ExplorerLink } from "@/components/ExplorerLink";
 import { ADDRESSES } from "@/lib/addresses";
 import { computeTreasury, SWEEPER_FEE_RATE } from "@/lib/treasury";
+import { getAllRelayerCashFlows } from "@/lib/explorerApi";
 import { getEthPriceUsd } from "@/lib/prices";
 import { ArrowDownToLine, ArrowUpFromLine, Fuel, Wallet } from "lucide-react";
 
@@ -33,15 +34,29 @@ export const revalidate = 60;
 export default async function Page({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const [allSweepsByChain, allCreditsByChain, allSpendsByChain, allPaymasterByChain, balances, ethUsd] =
-    await Promise.all([
-      Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
-      Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerCredits(c))),
-      Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerSpends(c))),
-      Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
-      getOperationalBalances(),
-      getEthPriceUsd(),
-    ]);
+  const [
+    allSweepsByChain,
+    allCreditsByChain,
+    allSpendsByChain,
+    allPaymasterByChain,
+    balances,
+    ethUsd,
+    relayerFlows,
+  ] = await Promise.all([
+    Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
+    Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerCredits(c))),
+    Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerSpends(c))),
+    Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
+    getOperationalBalances(),
+    getEthPriceUsd(),
+    getAllRelayerCashFlows(),
+  ]);
+
+  const explorerApiAvailable = relayerFlows.some((f) => f.available);
+  const relayerNetDirectSpendWei = relayerFlows.reduce(
+    (acc, f) => acc + (f.available ? f.netSpent : 0n),
+    0n
+  );
 
   const sweeps = allSweepsByChain.flat();
   const credits = allCreditsByChain.flat();
@@ -58,11 +73,12 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
   const totalGasCost = sumGasCost(inPeriodPaymaster);
   const totalGasUsd = (Number(totalGasCost) / 1e18) * ethUsd;
 
-  // Break-even math: sweeper fee revenue vs paymaster gas burn.
+  // Break-even math: sweeper fee revenue vs (paymaster gas + direct relayer outflow).
   const totalSweeperFees = sweeps.reduce((acc, s) => acc + s.fee, 0n);
   const treasury = computeTreasury({
     sweeperFeesUsdc: totalSweeperFees,
     gasSpentWei: totalGasCost,
+    relayerDirectSpendWei: relayerNetDirectSpendWei,
     cashinVolumeUsdc: totalIn,
     ethUsd,
   });
@@ -141,11 +157,12 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
           </span>
         </div>
         <p className="text-xs text-text-muted mb-4">
-          Relayer revenue (1% sweeper fee on every cash-in) vs gas burn (paymaster
-          sponsorships). Negative net is expected on testnet — the metric to watch
-          is the additional cash-in volume that would flip it positive.
+          Relayer revenue (1% sweeper fee on every cash-in) vs full relayer cost
+          (paymaster sponsorships + direct ETH funded to stealths). Negative net
+          is expected on testnet — the metric to watch is the additional cash-in
+          volume that would flip it positive.
         </p>
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-5 gap-4">
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted">
               Sweeper revenue
@@ -157,12 +174,25 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted">
-              Paymaster gas burn
+              Paymaster gas
             </div>
             <div className="text-xl font-semibold tabular-nums text-accent-red">
-              −{fmtUsd(treasury.gasSpentUsd)}
+              −{fmtUsd(treasury.paymasterGasUsd)}
             </div>
             <div className="text-[11px] text-text-muted">{fmtEth(totalGasCost)} ETH · {inPeriodPaymaster.length} ops</div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Stealth top-ups
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-red">
+              {explorerApiAvailable ? `−${fmtUsd(treasury.relayerDirectSpendUsd)}` : "—"}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {explorerApiAvailable
+                ? `${fmtEth(relayerNetDirectSpendWei)} ETH net (out − dust returns)`
+                : "Set ETHERSCAN/BASESCAN/ARBISCAN_API_KEY"}
+            </div>
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted">
@@ -178,12 +208,12 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
               {fmtUsd(treasury.netUsd)}
             </div>
             <div className="text-[11px] text-text-muted">
-              {(treasury.coverage * 100).toFixed(0)}% of gas covered
+              {(treasury.coverage * 100).toFixed(0)}% covered
             </div>
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted">
-              {treasury.netUsd >= 0 ? "Cushion" : "Break-even gap"}
+              {treasury.netUsd >= 0 ? "Cushion" : "Cash-in gap"}
             </div>
             <div className="text-xl font-semibold tabular-nums text-accent-amber">
               {treasury.netUsd >= 0
@@ -193,10 +223,19 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
             <div className="text-[11px] text-text-muted">
               {treasury.netUsd >= 0
                 ? "Above break-even"
-                : `more cash-in @ 1% fee to flip green`}
+                : "more cash-in to flip green"}
             </div>
           </div>
         </div>
+        {!explorerApiAvailable && (
+          <div className="mt-3 px-3 py-2 rounded-md bg-accent-amber/10 border border-accent-amber/30 text-[11px] text-accent-amber">
+            ⚠ Stealth-funding outflows missing — only the paymaster's gas burn is
+            counted right now. Set ETHERSCAN_API_KEY / BASESCAN_API_KEY /
+            ARBISCAN_API_KEY env vars (free from each explorer) to capture the
+            relayer's direct ETH transfers to stealths. The "Net" cell may be
+            understated by 2-10×.
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-6">

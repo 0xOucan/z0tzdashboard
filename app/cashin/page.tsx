@@ -16,6 +16,7 @@ import { getPaymasterOps } from "@/lib/events";
 import { sumGasCost } from "@/lib/aggregate";
 import { computeTreasury } from "@/lib/treasury";
 import { getEthPriceUsd } from "@/lib/prices";
+import { getAllRelayerCashFlows } from "@/lib/explorerApi";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
@@ -23,12 +24,19 @@ export const revalidate = 60;
 export default async function CashInPage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const [sweepsPerChain, creditsPerChain, paymasterPerChain, ethUsd] = await Promise.all([
-    Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
-    Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerCredits(c))),
-    Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
-    getEthPriceUsd(),
-  ]);
+  const [sweepsPerChain, creditsPerChain, paymasterPerChain, ethUsd, relayerFlows] =
+    await Promise.all([
+      Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
+      Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerCredits(c))),
+      Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
+      getEthPriceUsd(),
+      getAllRelayerCashFlows(),
+    ]);
+  const explorerApiAvailable = relayerFlows.some((f) => f.available);
+  const relayerNetDirectSpendWei = relayerFlows.reduce(
+    (acc, f) => acc + (f.available ? f.netSpent : 0n),
+    0n
+  );
 
   const sweeps = filterByPeriod(sweepsPerChain.flat(), period);
   const credits = filterByPeriod(creditsPerChain.flat(), period);
@@ -43,6 +51,7 @@ export default async function CashInPage({ searchParams }: { searchParams: { per
   const treasury = computeTreasury({
     sweeperFeesUsdc: totalFees,
     gasSpentWei,
+    relayerDirectSpendWei: relayerNetDirectSpendWei,
     cashinVolumeUsdc: totalSwept,
     ethUsd,
   });
@@ -114,7 +123,7 @@ export default async function CashInPage({ searchParams }: { searchParams: { per
           sponsor user ops in the same window. Each 1% sweeper fee on a $X cash-in
           needs to cover ~$X × current avg-op-cost ÷ avg-cash-in-size in gas.
         </p>
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-5 gap-4">
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted">
               Sweeper revenue
@@ -128,13 +137,26 @@ export default async function CashInPage({ searchParams }: { searchParams: { per
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted">
-              Gas burned
+              Paymaster gas
             </div>
             <div className="text-xl font-semibold tabular-nums text-accent-red">
-              −{fmtUsd(treasury.gasSpentUsd)}
+              −{fmtUsd(treasury.paymasterGasUsd)}
             </div>
             <div className="text-[11px] text-text-muted">
               {fmtEth(gasSpentWei)} ETH · {periodOps.length} ops
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Stealth top-ups
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-red">
+              {explorerApiAvailable ? `−${fmtUsd(treasury.relayerDirectSpendUsd)}` : "—"}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {explorerApiAvailable
+                ? `${fmtEth(relayerNetDirectSpendWei)} ETH net`
+                : "Explorer API key not set"}
             </div>
           </div>
           <div>
@@ -170,6 +192,13 @@ export default async function CashInPage({ searchParams }: { searchParams: { per
             </div>
           </div>
         </div>
+        {!explorerApiAvailable && (
+          <div className="mt-3 px-3 py-2 rounded-md bg-accent-amber/10 border border-accent-amber/30 text-[11px] text-accent-amber">
+            ⚠ Stealth-funding outflows not counted — set ETHERSCAN_API_KEY /
+            BASESCAN_API_KEY / ARBISCAN_API_KEY (free) to capture native ETH
+            transfers from the relayer to stealth EOAs.
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-3 gap-4 mb-6">

@@ -19,8 +19,14 @@ export const SWEEPER_FEE_RATE = SWEEPER_FEE_BPS / 10_000; // 0.01
 export type TreasurySnapshot = {
   /** Total sweeper fees collected, in USDC 6-decimal units. */
   sweeperFeesUsdc: bigint;
-  /** Total paymaster + relayer gas spent, in wei. */
+  /** Paymaster gas burn (via EntryPoint UserOperationEvent), wei. */
   gasSpentWei: bigint;
+  /**
+   * Net ETH the relayer EOA has sent directly to stealths (outflow − dust
+   * returns), wei. Captured from explorer API tx history; will be 0n when
+   * the explorer API keys aren't configured.
+   */
+  relayerDirectSpendWei?: bigint;
   /** Total cash-in volume, in USDC 6-decimal units. */
   cashinVolumeUsdc: bigint;
   /** ETH spot price in USD. */
@@ -29,21 +35,26 @@ export type TreasurySnapshot = {
 
 export type TreasuryEconomics = {
   sweeperFeesUsd: number;
-  gasSpentUsd: number;
+  paymasterGasUsd: number;
+  relayerDirectSpendUsd: number;
+  totalCostUsd: number; // paymaster + direct
   cashinVolumeUsd: number;
-  netUsd: number; // fees − gas; positive = profitable
-  coverage: number; // fees / gas; 1.0 = break-even
-  breakEvenAdditionalCashinUsd: number; // USDC cash-in still needed to cover
+  netUsd: number; // fees − total cost; positive = profitable
+  coverage: number; // fees / total cost; 1.0 = break-even
+  breakEvenAdditionalCashinUsd: number;
   status: "profit" | "breakeven" | "loss";
 };
 
 export function computeTreasury(s: TreasurySnapshot): TreasuryEconomics {
   const sweeperFeesUsd = Number(s.sweeperFeesUsdc) / 1e6;
-  const gasSpentUsd = (Number(s.gasSpentWei) / 1e18) * s.ethUsd;
+  const paymasterGasUsd = (Number(s.gasSpentWei) / 1e18) * s.ethUsd;
+  const relayerDirectSpendUsd =
+    (Number(s.relayerDirectSpendWei ?? 0n) / 1e18) * s.ethUsd;
+  const totalCostUsd = paymasterGasUsd + relayerDirectSpendUsd;
   const cashinVolumeUsd = Number(s.cashinVolumeUsdc) / 1e6;
-  const netUsd = sweeperFeesUsd - gasSpentUsd;
-  const coverage = gasSpentUsd > 0 ? sweeperFeesUsd / gasSpentUsd : Number.POSITIVE_INFINITY;
-  const additionalCashinNeeded = Math.max(0, (gasSpentUsd - sweeperFeesUsd) / SWEEPER_FEE_RATE);
+  const netUsd = sweeperFeesUsd - totalCostUsd;
+  const coverage = totalCostUsd > 0 ? sweeperFeesUsd / totalCostUsd : Number.POSITIVE_INFINITY;
+  const additionalCashinNeeded = Math.max(0, (totalCostUsd - sweeperFeesUsd) / SWEEPER_FEE_RATE);
 
   let status: "profit" | "breakeven" | "loss" = "loss";
   if (netUsd >= 0) status = "profit";
@@ -51,7 +62,9 @@ export function computeTreasury(s: TreasurySnapshot): TreasuryEconomics {
 
   return {
     sweeperFeesUsd,
-    gasSpentUsd,
+    paymasterGasUsd,
+    relayerDirectSpendUsd,
+    totalCostUsd,
     cashinVolumeUsd,
     netUsd,
     coverage,

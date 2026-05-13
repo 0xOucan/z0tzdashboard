@@ -8,10 +8,14 @@ import { EventTable } from "@/components/EventTable";
 import { getSweepEvents, getLedgerCredits } from "@/lib/events";
 import { bucketDaily, filterByPeriod, sumUsdc, totalsByChain } from "@/lib/aggregate";
 import { SUPPORTED_CHAINS, CHAIN_META } from "@/lib/rpc";
-import { fmtUsdc, fmtCompact } from "@/lib/format";
+import { fmtUsdc, fmtCompact, fmtUsd, fmtEth } from "@/lib/format";
 import { ChainBadge } from "@/components/ChainBadge";
 import { ExplorerLink } from "@/components/ExplorerLink";
 import { ArrowDownToLine } from "lucide-react";
+import { getPaymasterOps } from "@/lib/events";
+import { sumGasCost } from "@/lib/aggregate";
+import { computeTreasury } from "@/lib/treasury";
+import { getEthPriceUsd } from "@/lib/prices";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
@@ -19,18 +23,29 @@ export const revalidate = 60;
 export default async function CashInPage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const [sweepsPerChain, creditsPerChain] = await Promise.all([
+  const [sweepsPerChain, creditsPerChain, paymasterPerChain, ethUsd] = await Promise.all([
     Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
     Promise.all(SUPPORTED_CHAINS.map((c) => getLedgerCredits(c))),
+    Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
+    getEthPriceUsd(),
   ]);
 
   const sweeps = filterByPeriod(sweepsPerChain.flat(), period);
   const credits = filterByPeriod(creditsPerChain.flat(), period);
+  const periodOps = filterByPeriod(paymasterPerChain.flat(), period);
 
   const totalSwept = sumUsdc(sweeps);
   const totalCredited = sumUsdc(credits);
   const totalFees = sweeps.reduce((acc, s) => acc + s.fee, 0n);
   const avgSweep = sweeps.length > 0 ? totalSwept / BigInt(sweeps.length) : 0n;
+
+  const gasSpentWei = sumGasCost(periodOps);
+  const treasury = computeTreasury({
+    sweeperFeesUsdc: totalFees,
+    gasSpentWei,
+    cashinVolumeUsdc: totalSwept,
+    ethUsd,
+  });
 
   const chart = bucketDaily(credits, (e) => e.netAmount, PERIOD_DAYS[period] ?? 7);
   const totalsByChainMap = totalsByChain(credits, (e) => e.netAmount);
@@ -72,6 +87,89 @@ export default async function CashInPage({ searchParams }: { searchParams: { per
           value={fmtUsdc(avgSweep)}
           sublabel="Per sweep"
         />
+      </div>
+
+      <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-medium">Break-even — fees vs gas</h3>
+          <span
+            className={
+              "text-xs px-2 py-0.5 rounded font-medium uppercase tracking-wider " +
+              (treasury.status === "profit"
+                ? "bg-accent-green/20 text-accent-green"
+                : treasury.status === "breakeven"
+                ? "bg-accent-amber/20 text-accent-amber"
+                : "bg-accent-red/20 text-accent-red")
+            }
+          >
+            {treasury.status === "profit"
+              ? "Profitable"
+              : treasury.status === "breakeven"
+              ? "Near break-even"
+              : "Operating at loss"}
+          </span>
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Sweeper fee revenue collected on the {period} window vs gas burned to
+          sponsor user ops in the same window. Each 1% sweeper fee on a $X cash-in
+          needs to cover ~$X × current avg-op-cost ÷ avg-cash-in-size in gas.
+        </p>
+        <div className="grid grid-cols-4 gap-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Sweeper revenue
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-green">
+              {fmtUsd(treasury.sweeperFeesUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {sweeps.length} sweeps · {fmtUsd(treasury.cashinVolumeUsd)} volume
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Gas burned
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-red">
+              −{fmtUsd(treasury.gasSpentUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {fmtEth(gasSpentWei)} ETH · {periodOps.length} ops
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Net
+            </div>
+            <div
+              className={
+                "text-xl font-semibold tabular-nums " +
+                (treasury.netUsd >= 0 ? "text-accent-green" : "text-accent-red")
+              }
+            >
+              {treasury.netUsd >= 0 ? "+" : ""}
+              {fmtUsd(treasury.netUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              Coverage: {treasury.coverage === Number.POSITIVE_INFINITY ? "∞" : `${(treasury.coverage * 100).toFixed(0)}%`}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              {treasury.netUsd >= 0 ? "Cushion" : "Cash-in gap"}
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-amber">
+              {treasury.netUsd >= 0
+                ? fmtUsd(treasury.netUsd)
+                : fmtUsd(treasury.breakEvenAdditionalCashinUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {treasury.netUsd >= 0
+                ? "Above break-even"
+                : "more cash-in volume needed"}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-4 mb-6">

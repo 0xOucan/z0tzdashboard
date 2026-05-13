@@ -23,6 +23,7 @@ import { SUPPORTED_CHAINS, CHAIN_META, type SupportedChainId } from "@/lib/rpc";
 import { fmtUsdc, fmtEth, fmtUsd, fmtCompact } from "@/lib/format";
 import { ExplorerLink } from "@/components/ExplorerLink";
 import { ADDRESSES } from "@/lib/addresses";
+import { computeTreasury, SWEEPER_FEE_RATE } from "@/lib/treasury";
 import { getEthPriceUsd } from "@/lib/prices";
 import { ArrowDownToLine, ArrowUpFromLine, Fuel, Wallet } from "lucide-react";
 
@@ -56,6 +57,15 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
   const totalOutCount = cashoutSpends.length;
   const totalGasCost = sumGasCost(inPeriodPaymaster);
   const totalGasUsd = (Number(totalGasCost) / 1e18) * ethUsd;
+
+  // Break-even math: sweeper fee revenue vs paymaster gas burn.
+  const totalSweeperFees = sweeps.reduce((acc, s) => acc + s.fee, 0n);
+  const treasury = computeTreasury({
+    sweeperFeesUsdc: totalSweeperFees,
+    gasSpentWei: totalGasCost,
+    cashinVolumeUsdc: totalIn,
+    ethUsd,
+  });
 
   const totalPaymasterDeposit = balances.paymaster.reduce(
     (acc, b) => acc + (b.paymasterDeposit ?? 0n),
@@ -108,6 +118,85 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
           tone="blue"
           icon={<Wallet className="w-4 h-4" />}
         />
+      </div>
+
+      <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-medium">Treasury economics — break-even watch</h3>
+          <span
+            className={
+              "text-xs px-2 py-0.5 rounded font-medium uppercase tracking-wider " +
+              (treasury.status === "profit"
+                ? "bg-accent-green/20 text-accent-green"
+                : treasury.status === "breakeven"
+                ? "bg-accent-amber/20 text-accent-amber"
+                : "bg-accent-red/20 text-accent-red")
+            }
+          >
+            {treasury.status === "profit"
+              ? "Profitable"
+              : treasury.status === "breakeven"
+              ? "Near break-even"
+              : "Operating at loss"}
+          </span>
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Relayer revenue (1% sweeper fee on every cash-in) vs gas burn (paymaster
+          sponsorships). Negative net is expected on testnet — the metric to watch
+          is the additional cash-in volume that would flip it positive.
+        </p>
+        <div className="grid grid-cols-4 gap-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Sweeper revenue
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-green">
+              {fmtUsd(treasury.sweeperFeesUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">1% of {fmtUsd(treasury.cashinVolumeUsd)} swept</div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Paymaster gas burn
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-red">
+              −{fmtUsd(treasury.gasSpentUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">{fmtEth(totalGasCost)} ETH · {inPeriodPaymaster.length} ops</div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              Net
+            </div>
+            <div
+              className={
+                "text-xl font-semibold tabular-nums " +
+                (treasury.netUsd >= 0 ? "text-accent-green" : "text-accent-red")
+              }
+            >
+              {treasury.netUsd >= 0 ? "+" : ""}
+              {fmtUsd(treasury.netUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {(treasury.coverage * 100).toFixed(0)}% of gas covered
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted">
+              {treasury.netUsd >= 0 ? "Cushion" : "Break-even gap"}
+            </div>
+            <div className="text-xl font-semibold tabular-nums text-accent-amber">
+              {treasury.netUsd >= 0
+                ? fmtUsd(treasury.netUsd)
+                : fmtUsd(treasury.breakEvenAdditionalCashinUsd)}
+            </div>
+            <div className="text-[11px] text-text-muted">
+              {treasury.netUsd >= 0
+                ? "Above break-even"
+                : `more cash-in @ 1% fee to flip green`}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-6">

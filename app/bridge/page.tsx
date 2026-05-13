@@ -4,8 +4,9 @@ import { PeriodSelector } from "@/components/PeriodSelector";
 import { parsePeriod } from "@/components/period";
 import { ChainBadge } from "@/components/ChainBadge";
 import { EventTable } from "@/components/EventTable";
-import { getCctpBurns } from "@/lib/events";
+import { getCctpBurns, getSweepEvents } from "@/lib/events";
 import { filterByPeriod, sumUsdc, totalsByChain } from "@/lib/aggregate";
+import { getAllRelayerCashFlows } from "@/lib/explorerApi";
 import { SUPPORTED_CHAINS, CHAIN_META, type SupportedChainId } from "@/lib/rpc";
 import { fmtUsdc, fmtCompact } from "@/lib/format";
 import { ExplorerLink } from "@/components/ExplorerLink";
@@ -31,8 +32,29 @@ function domainLabel(d: number): string {
 export default async function BridgePage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const burnsPerChain = await Promise.all(SUPPORTED_CHAINS.map((c) => getCctpBurns(c)));
-  const burns = filterByPeriod(burnsPerChain.flat(), period);
+  const [burnsPerChain, sweepsPerChain, relayerFlows] = await Promise.all([
+    Promise.all(SUPPORTED_CHAINS.map((c) => getCctpBurns(c))),
+    Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
+    getAllRelayerCashFlows(),
+  ]);
+
+  // Z0tz-only filter — keep only CCTP burns whose depositor is a known
+  // Z0tz stealth (appeared in PrivateSweep) or was funded by the relayer.
+  // Anyone else is third-party CCTP traffic on the same USDC contract.
+  const z0tzAddrs = new Set<string>();
+  for (const s of sweepsPerChain.flat()) {
+    z0tzAddrs.add((s.stealthAddress as string).toLowerCase());
+  }
+  for (const f of relayerFlows) {
+    for (const d of f.destinations) z0tzAddrs.add(d.address.toLowerCase());
+  }
+
+  const allBurns = burnsPerChain.flat();
+  const z0tzBurns = allBurns.filter((b) =>
+    z0tzAddrs.has((b.depositor as string).toLowerCase())
+  );
+  const burns = filterByPeriod(z0tzBurns, period);
+  const filteredOutCount = allBurns.length - z0tzBurns.length;
 
   const totalVolume = sumUsdc(burns);
   const totalsByChainMap = totalsByChain(burns, (e) => e.amount);
@@ -51,7 +73,7 @@ export default async function BridgePage({ searchParams }: { searchParams: { per
   }
   const flows = Array.from(flowMap.values()).sort((a, b) => Number(b.volume - a.volume));
 
-  const recent = [...burnsPerChain.flat()]
+  const recent = [...z0tzBurns]
     .sort((a, b) => b.blockTimestamp - a.blockTimestamp)
     .slice(0, 30);
 
@@ -59,7 +81,7 @@ export default async function BridgePage({ searchParams }: { searchParams: { per
     <div>
       <PageHeader
         title="Bridge"
-        subtitle="Circle CCTP V2 burns sourced from this chain. Includes Z0tz cash-in / cash-out / self-bridge flows and any other CCTP traffic on the same USDC."
+        subtitle={`Circle CCTP V2 burns sourced from this chain, filtered to Z0tz flows (depositor is a known Z0tz stealth or relayer-funded address). ${filteredOutCount.toLocaleString()} third-party CCTP burns hidden.`}
         right={<PeriodSelector active={period} />}
       />
 

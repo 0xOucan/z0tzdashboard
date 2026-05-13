@@ -58,14 +58,22 @@ async function scanContractEvents<TLogArgs extends Record<string, unknown>>(
   from: bigint,
   to: bigint
 ): Promise<Array<{ blockNumber: bigint; transactionHash: `0x${string}`; args: TLogArgs }>> {
-  const raw = await scanLogsReverse(client, from, to, (s, e) =>
-    client.getLogs({ address, event: eventAbi, fromBlock: s, toBlock: e })
-  );
-  return raw.map((log: any) => ({
-    blockNumber: log.blockNumber as bigint,
-    transactionHash: log.transactionHash as `0x${string}`,
-    args: log.args as TLogArgs,
-  }));
+  try {
+    const raw = await scanLogsReverse(client, from, to, (s, e) =>
+      client.getLogs({ address, event: eventAbi, fromBlock: s, toBlock: e })
+    );
+    return raw.map((log: any) => ({
+      blockNumber: log.blockNumber as bigint,
+      transactionHash: log.transactionHash as `0x${string}`,
+      args: log.args as TLogArgs,
+    }));
+  } catch (err) {
+    console.warn(
+      `governance: scanContractEvents(${address}) failed:`,
+      (err as Error).message
+    );
+    return [];
+  }
 }
 
 function short(addr: string): string {
@@ -77,16 +85,21 @@ export async function scanGovernance(): Promise<GovEvent[]> {
   return cached("governanceEvents", CACHE_TTL, async () => {
     const events: GovEvent[] = [];
 
-    await Promise.all(
-      SUPPORTED_CHAINS.map(async (chainId) => {
+    // Sequential per chain to keep RPC pressure manageable — each chain
+    // fires off many parallel event scans internally already.
+    for (const chainId of SUPPORTED_CHAINS) {
+      try {
         const addr = ADDRESSES[chainId];
         const client = publicClient(chainId);
         const { from, to } = await getScanRange(chainId, client);
 
-        // ── Recovery module (per-account proxy implementation). The
-        //    deployed implementation is the canonical contract; per-account
-        //    proxies forward events to the impl logs. We scan the impl.
-        const recoveryAddr = addr.recoveryModuleImpl;
+        // ── Recovery module. The address in the registry is the
+        //    *implementation* — events actually emit from each account's
+        //    per-account proxy, NOT from the impl. We can't enumerate every
+        //    proxy here without a separate indexer, so this scan returns
+        //    empty for now. Left wired so a future "list of accounts" feed
+        //    can pass concrete proxy addresses through.
+        const recoveryAddr = null as Address | null;
         const recoveryTasks = recoveryAddr
           ? [
               scanContractEvents(client, recoveryAddr, RECOVERY_MODULE_ABI[0], from, to).then((logs) =>
@@ -344,8 +357,10 @@ export async function scanGovernance(): Promise<GovEvent[]> {
         }));
         const withTs = await withBlockTimestamps(client, flat);
         events.push(...(withTs as unknown as GovEvent[]));
-      })
-    );
+      } catch (err) {
+        console.warn(`governance scan for chain ${chainId} failed:`, (err as Error).message);
+      }
+    }
 
     return events.sort((a, b) => b.blockTimestamp - a.blockTimestamp);
   });

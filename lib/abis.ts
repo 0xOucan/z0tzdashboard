@@ -96,7 +96,11 @@ export const CCTP_ABI = [
       { name: "burnToken", type: "address", indexed: true },
       { name: "amount", type: "uint256", indexed: false },
       { name: "depositor", type: "address", indexed: true },
-      { name: "mintRecipient", type: "bytes32", indexed: true },
+      // V2 emits `mintRecipient` as a NON-indexed data field. The earlier draft
+      // had it indexed, which shifted every subsequent field by one 32-byte
+      // slot → destinationDomain decoded as the low 32 bits of mintRecipient
+      // (huge garbled numbers on /bridge).
+      { name: "mintRecipient", type: "bytes32", indexed: false },
       { name: "destinationDomain", type: "uint32", indexed: false },
       { name: "destinationTokenMessenger", type: "bytes32", indexed: false },
       { name: "destinationCaller", type: "bytes32", indexed: false },

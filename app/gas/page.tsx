@@ -19,6 +19,7 @@ import { getEthPriceUsd } from "@/lib/prices";
 import { Fuel, Wallet, AlertTriangle, CheckCircle2, TrendingUp, XCircle } from "lucide-react";
 import { ADDRESSES } from "@/lib/addresses";
 import { getAllRelayerCashFlows } from "@/lib/explorerApi";
+import { auditAllChains, type DestinationCategory } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
@@ -34,12 +35,37 @@ const OP_CLASS_LABEL: Record<string, string> = {
 export default async function GasPage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const [paymasterPerChain, balances, ethUsd, relayerFlows] = await Promise.all([
+  const [paymasterPerChain, balances, ethUsd, relayerFlows, audits] = await Promise.all([
     Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
     getOperationalBalances(),
     getEthPriceUsd(),
     getAllRelayerCashFlows(),
+    auditAllChains(SUPPORTED_CHAINS),
   ]);
+
+  // Aggregate audit categories across chains.
+  type CatTotals = { count: number; netWei: bigint };
+  const categoryTotals: Record<DestinationCategory, CatTotals> = {
+    cashin: { count: 0, netWei: 0n },
+    bridge: { count: 0, netWei: 0n },
+    defi: { count: 0, netWei: 0n },
+    unknown: { count: 0, netWei: 0n },
+  };
+  for (const a of audits) {
+    if (!a.available) continue;
+    (Object.keys(categoryTotals) as DestinationCategory[]).forEach((k) => {
+      categoryTotals[k].count += a.categories[k];
+      categoryTotals[k].netWei += a.netByCategory[k];
+    });
+  }
+  const totalDestinations = audits.reduce((a, x) => a + x.totalDestinations, 0);
+  const allDestinations = audits
+    .flatMap((a) => a.destinations)
+    .sort((a, b) => Number(b.netSpent - a.netSpent));
+  // Largest 15 unknown destinations — most actionable for the operator.
+  const unknownTopRows = allDestinations
+    .filter((d) => d.category === "unknown")
+    .slice(0, 15);
   const explorerApiAvailable = relayerFlows.some((f) => f.available);
   const totalRelayerOut = relayerFlows.reduce(
     (a, f) => a + (f.available ? f.outflow : 0n),
@@ -569,6 +595,106 @@ export default async function GasPage({ searchParams }: { searchParams: { period
           </tbody>
         </table>
       </div>
+
+      {explorerApiAvailable && (
+        <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
+          <h3 className="font-medium mb-1">Relayer top-up audit — destinations classified</h3>
+          <p className="text-xs text-text-muted mb-4">
+            Each address the relayer sent ETH to, classified by what it did next on
+            chain. "Unknown" = funded but no sweep, no CCTP burn, no Tezcatli activity
+            we can observe. Worth investigating individually.
+          </p>
+
+          <div className="grid grid-cols-4 gap-4 mb-4">
+            {(["cashin", "bridge", "defi", "unknown"] as DestinationCategory[]).map(
+              (cat) => {
+                const t = categoryTotals[cat];
+                const usd = (Number(t.netWei) / 1e18) * ethUsd;
+                const pct =
+                  totalDestinations > 0
+                    ? ((t.count / totalDestinations) * 100).toFixed(0)
+                    : "0";
+                const labels: Record<DestinationCategory, string> = {
+                  cashin: "Cash-in stealths",
+                  bridge: "CCTP bridge",
+                  defi: "DeFi stealths",
+                  unknown: "Unknown",
+                };
+                const tones: Record<DestinationCategory, string> = {
+                  cashin: "text-accent-green",
+                  bridge: "text-accent-blue",
+                  defi: "text-accent",
+                  unknown: "text-accent-red",
+                };
+                return (
+                  <div key={cat} className="border border-border rounded-md p-3">
+                    <div className="text-[11px] uppercase tracking-wider text-text-muted mb-2">
+                      {labels[cat]}
+                    </div>
+                    <div className={"text-xl font-semibold tabular-nums " + tones[cat]}>
+                      {t.count}
+                    </div>
+                    <div className="text-[11px] text-text-muted mt-1">
+                      {pct}% of destinations · {fmtUsd(usd)} net
+                    </div>
+                  </div>
+                );
+              }
+            )}
+          </div>
+
+          {unknownTopRows.length > 0 && (
+            <div>
+              <h4 className="text-sm font-medium mb-1">
+                Top "unknown" destinations
+              </h4>
+              <p className="text-[11px] text-text-muted mb-2">
+                Funded by the relayer, but no on-chain Z0tz activity observed.
+                Open the explorer link to see what each address actually did.
+              </p>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wider text-text-muted border-b border-border">
+                    <th className="pb-2 font-normal">Chain</th>
+                    <th className="pb-2 font-normal">Address</th>
+                    <th className="pb-2 font-normal text-right">Funded</th>
+                    <th className="pb-2 font-normal text-right">Returned</th>
+                    <th className="pb-2 font-normal text-right">Net ETH</th>
+                    <th className="pb-2 font-normal text-right">Net USD</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unknownTopRows.map((d, i) => (
+                    <tr
+                      key={`${d.chainId}-${d.address}-${i}`}
+                      className="border-b border-border last:border-0"
+                    >
+                      <td className="py-2.5">
+                        <ChainBadge chainId={d.chainId} />
+                      </td>
+                      <td className="py-2.5">
+                        <ExplorerLink chainId={d.chainId} value={d.address} type="address" />
+                      </td>
+                      <td className="py-2.5 text-right tabular-nums text-text-muted">
+                        {fmtEth(d.outflow)}
+                      </td>
+                      <td className="py-2.5 text-right tabular-nums text-accent-green">
+                        {d.inflow > 0n ? `+${fmtEth(d.inflow)}` : "0"}
+                      </td>
+                      <td className="py-2.5 text-right tabular-nums">
+                        {fmtEth(d.netSpent)}
+                      </td>
+                      <td className="py-2.5 text-right tabular-nums text-text-muted">
+                        {fmtUsd((Number(d.netSpent) / 1e18) * ethUsd)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {recentFails.length > 0 && (
         <div className="bg-bg-card border border-border rounded-lg p-5">

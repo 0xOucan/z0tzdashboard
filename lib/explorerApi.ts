@@ -76,6 +76,16 @@ async function fetchTxList(
   }
 }
 
+export type DestinationFlow = {
+  /** Recipient address (lowercased). */
+  address: `0x${string}`;
+  outflow: bigint;
+  inflow: bigint;
+  netSpent: bigint;
+  outflowTxCount: number;
+  inflowTxCount: number;
+};
+
 export type RelayerCashFlow = {
   chainId: SupportedChainId;
   /** Has the explorer API key been configured for this chain? */
@@ -88,6 +98,8 @@ export type RelayerCashFlow = {
   netSpent: bigint;
   outflowTxCount: number;
   inflowTxCount: number;
+  /** Per-destination breakdown — unique addresses on the other side of the relayer's txs. */
+  destinations: DestinationFlow[];
 };
 
 export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<RelayerCashFlow> {
@@ -103,23 +115,54 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         netSpent: 0n,
         outflowTxCount: 0,
         inflowTxCount: 0,
+        destinations: [],
       };
     }
     let outflow = 0n;
     let inflow = 0n;
     let outCount = 0;
     let inCount = 0;
+    const byAddr = new Map<string, DestinationFlow>();
     for (const tx of txs) {
       const value = BigInt(tx.value || "0");
       if (value === 0n) continue;
-      if (tx.from.toLowerCase() === relayer) {
+      const fromLc = tx.from.toLowerCase();
+      const toLc = tx.to.toLowerCase();
+      if (fromLc === relayer) {
         outflow += value;
         outCount += 1;
-      } else if (tx.to.toLowerCase() === relayer) {
+        const cur = byAddr.get(toLc) ?? {
+          address: toLc as `0x${string}`,
+          outflow: 0n,
+          inflow: 0n,
+          netSpent: 0n,
+          outflowTxCount: 0,
+          inflowTxCount: 0,
+        };
+        cur.outflow += value;
+        cur.outflowTxCount += 1;
+        byAddr.set(toLc, cur);
+      } else if (toLc === relayer) {
         inflow += value;
         inCount += 1;
+        const cur = byAddr.get(fromLc) ?? {
+          address: fromLc as `0x${string}`,
+          outflow: 0n,
+          inflow: 0n,
+          netSpent: 0n,
+          outflowTxCount: 0,
+          inflowTxCount: 0,
+        };
+        cur.inflow += value;
+        cur.inflowTxCount += 1;
+        byAddr.set(fromLc, cur);
       }
     }
+    // Finalize netSpent per destination.
+    const destinations = Array.from(byAddr.values()).map((d) => ({
+      ...d,
+      netSpent: d.outflow - d.inflow,
+    }));
     return {
       chainId,
       available: true,
@@ -128,6 +171,7 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
       netSpent: outflow - inflow,
       outflowTxCount: outCount,
       inflowTxCount: inCount,
+      destinations,
     };
   });
 }

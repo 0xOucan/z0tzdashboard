@@ -33,11 +33,28 @@ const OP_CLASS_LABEL: Record<string, string> = {
 export default async function GasPage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const [paymasterPerChain, balances, ethUsd] = await Promise.all([
+  const [paymasterPerChain, balances, ethUsd, relayerFlows] = await Promise.all([
     Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
     getOperationalBalances(),
     getEthPriceUsd(),
+    getAllRelayerCashFlows(),
   ]);
+  const explorerApiAvailable = relayerFlows.some((f) => f.available);
+  const totalRelayerOut = relayerFlows.reduce(
+    (a, f) => a + (f.available ? f.outflow : 0n),
+    0n
+  );
+  const totalRelayerIn = relayerFlows.reduce(
+    (a, f) => a + (f.available ? f.inflow : 0n),
+    0n
+  );
+  const totalRelayerNet = totalRelayerOut - totalRelayerIn;
+  const totalRelayerNetUsd = (Number(totalRelayerNet) / 1e18) * ethUsd;
+  const totalRelayerOutUsd = (Number(totalRelayerOut) / 1e18) * ethUsd;
+  const totalRelayerInUsd = (Number(totalRelayerIn) / 1e18) * ethUsd;
+  const totalOutCount = relayerFlows.reduce((a, f) => a + f.outflowTxCount, 0);
+  const totalInCount = relayerFlows.reduce((a, f) => a + f.inflowTxCount, 0);
+  const totalTreasuryCostUsd = ((Number(totalGasCost) / 1e18) * ethUsd) + totalRelayerNetUsd;
 
   const allOps = paymasterPerChain.flat();
   const ops = filterByPeriod(allOps, period);
@@ -135,31 +152,29 @@ export default async function GasPage({ searchParams }: { searchParams: { period
 
       <div className="grid grid-cols-4 gap-4 mb-6">
         <KpiCard
-          label="Total sponsored"
+          label="Paymaster gas"
           value={fmtUsd((Number(totalGasCost) / 1e18) * ethUsd)}
           sublabel={`${fmtEth(totalGasCost)} ETH · ${ops.length} ops · ${period}`}
           tone="red"
           icon={<Fuel className="w-4 h-4" />}
         />
         <KpiCard
-          label="Average gas / op"
-          value={fmtUsd(avgGasCostUsd)}
-          sublabel={`${(Number(totalGasUsed) / Math.max(ops.length, 1) / 1000).toFixed(0)}K gas used avg`}
-          tone="blue"
-          icon={<TrendingUp className="w-4 h-4" />}
+          label="Relayer direct ETH"
+          value={explorerApiAvailable ? fmtUsd(totalRelayerNetUsd) : "—"}
+          sublabel={
+            explorerApiAvailable
+              ? `${fmtEth(totalRelayerNet)} ETH net · ${totalOutCount} top-ups`
+              : "ETHERSCAN_API_KEY not set"
+          }
+          tone="red"
+          icon={<Fuel className="w-4 h-4" />}
         />
         <KpiCard
-          label="Success rate"
-          value={`${successRate.toFixed(1)}%`}
-          sublabel={`${successful.length} ok · ${failed.length} failed`}
-          tone={successRate >= 99 ? "green" : successRate >= 90 ? "amber" : "red"}
-          icon={
-            successRate >= 99 ? (
-              <CheckCircle2 className="w-4 h-4" />
-            ) : (
-              <AlertTriangle className="w-4 h-4" />
-            )
-          }
+          label="Total treasury cost"
+          value={explorerApiAvailable ? fmtUsd(totalTreasuryCostUsd) : fmtUsd((Number(totalGasCost) / 1e18) * ethUsd)}
+          sublabel={explorerApiAvailable ? "Paymaster + relayer direct" : "Paymaster only · top-ups missing"}
+          tone="amber"
+          icon={<TrendingUp className="w-4 h-4" />}
         />
         <KpiCard
           label="Runway (7d burn)"
@@ -178,6 +193,182 @@ export default async function GasPage({ searchParams }: { searchParams: { period
             )
           }
         />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <div className="bg-bg-card border border-border rounded-lg p-5">
+          <h3 className="font-medium mb-1 flex items-center gap-2">
+            <Fuel className="w-4 h-4" />
+            Paymaster sponsorships
+          </h3>
+          <p className="text-xs text-text-muted mb-4">
+            EntryPoint UserOperationEvent.actualGasCost — gas the paymaster paid
+            out of its EntryPoint deposit for sponsored ERC-4337 user ops.
+          </p>
+          <div className="space-y-3 text-sm">
+            <div className="flex justify-between">
+              <span className="text-text-muted">Avg gas / op</span>
+              <span className="tabular-nums">{fmtUsd(avgGasCostUsd)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-text-muted">Ops sponsored</span>
+              <span className="tabular-nums">{ops.length}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-text-muted">Success rate</span>
+              <span
+                className={
+                  "tabular-nums " +
+                  (successRate >= 99
+                    ? "text-accent-green"
+                    : successRate >= 90
+                    ? "text-accent-amber"
+                    : "text-accent-red")
+                }
+              >
+                {successRate.toFixed(1)}%
+                <span className="text-text-muted ml-2 text-xs">
+                  ({successful.length} ok · {failed.length} failed)
+                </span>
+              </span>
+            </div>
+            <div className="flex justify-between border-t border-border pt-3">
+              <span className="text-text-muted font-medium">Total ETH burned</span>
+              <span className="tabular-nums font-medium">{fmtEth(totalGasCost)} ETH</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-text-muted font-medium">Total USD</span>
+              <span className="tabular-nums font-medium text-accent-red">
+                {fmtUsd((Number(totalGasCost) / 1e18) * ethUsd)}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-bg-card border border-border rounded-lg p-5">
+          <h3 className="font-medium mb-1 flex items-center gap-2">
+            <Fuel className="w-4 h-4" />
+            Relayer EOA — direct ETH outflows
+          </h3>
+          <p className="text-xs text-text-muted mb-4">
+            Native ETH the relayer wallet (
+            <ExplorerLink
+              chainId={SUPPORTED_CHAINS[0]}
+              value={ADDRESSES[SUPPORTED_CHAINS[0]].relayerWallet}
+              type="address"
+            />
+            ) sent directly to stealths so they could sign their own txs (CCTP
+            burns, manual unshield claims, dust returns).
+          </p>
+          {explorerApiAvailable ? (
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-text-muted">Outflow (to stealths)</span>
+                <span className="tabular-nums">
+                  {fmtEth(totalRelayerOut)} ETH
+                  <span className="text-text-muted ml-2 text-xs">
+                    ({fmtUsd(totalRelayerOutUsd)})
+                  </span>
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-muted">Inflow (dust returns)</span>
+                <span className="tabular-nums text-accent-green">
+                  +{fmtEth(totalRelayerIn)} ETH
+                  <span className="text-text-muted ml-2 text-xs">
+                    ({fmtUsd(totalRelayerInUsd)})
+                  </span>
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-muted">Top-up txs / return txs</span>
+                <span className="tabular-nums">
+                  {totalOutCount} / {totalInCount}
+                </span>
+              </div>
+              <div className="flex justify-between border-t border-border pt-3">
+                <span className="text-text-muted font-medium">Net ETH spent</span>
+                <span className="tabular-nums font-medium">{fmtEth(totalRelayerNet)} ETH</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-muted font-medium">Net USD</span>
+                <span className="tabular-nums font-medium text-accent-red">
+                  {fmtUsd(totalRelayerNetUsd)}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-text-muted py-6 text-center">
+              Set <code>ETHERSCAN_API_KEY</code> to capture relayer outflows.
+              <br />
+              One Etherscan V2 key covers all 3 chains.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
+        <h3 className="font-medium mb-1">Per-chain relayer direct outflows</h3>
+        <p className="text-xs text-text-muted mb-4">
+          Source-of-truth tx history from each block explorer. Net = outflow − dust returns.
+        </p>
+        {explorerApiAvailable ? (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs uppercase tracking-wider text-text-muted border-b border-border">
+                <th className="pb-2 font-normal">Chain</th>
+                <th className="pb-2 font-normal text-right">Outflow ETH</th>
+                <th className="pb-2 font-normal text-right">Dust returns ETH</th>
+                <th className="pb-2 font-normal text-right">Net ETH</th>
+                <th className="pb-2 font-normal text-right">Net USD</th>
+                <th className="pb-2 font-normal text-right">Top-ups</th>
+                <th className="pb-2 font-normal text-right">Returns</th>
+              </tr>
+            </thead>
+            <tbody>
+              {relayerFlows.map((f) => (
+                <tr key={f.chainId} className="border-b border-border last:border-0">
+                  <td className="py-3">
+                    <ChainBadge chainId={f.chainId} />
+                  </td>
+                  <td className="py-3 text-right tabular-nums">
+                    {f.available ? fmtEth(f.outflow) : "—"}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-accent-green">
+                    {f.available ? `+${fmtEth(f.inflow)}` : "—"}
+                  </td>
+                  <td className="py-3 text-right tabular-nums font-medium">
+                    {f.available ? fmtEth(f.netSpent) : "—"}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    {f.available
+                      ? fmtUsd((Number(f.netSpent) / 1e18) * ethUsd)
+                      : "—"}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    {f.outflowTxCount}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    {f.inflowTxCount}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="text-sm text-text-muted py-6 text-center">
+            ETHERSCAN_API_KEY not configured. Set it (free at{" "}
+            <a
+              href="https://etherscan.io/myapikey"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-accent"
+            >
+              etherscan.io/myapikey
+            </a>
+            ) and one key covers all three chains.
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-6">

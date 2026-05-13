@@ -22,12 +22,11 @@ export const dynamic = "force-dynamic";
 export const revalidate = 60;
 
 const OP_CLASS_LABEL: Record<string, string> = {
-  deploy: "Deploy / init",
-  cashin: "Cash-in credit",
-  spend: "Spend (internal)",
-  cashout: "Cashout + rotate",
-  rotate: "Rotate",
-  other: "Other",
+  defiDeposit: "DeFi deposit (Tezcatli, ~1.7M gas)",
+  defiWithdraw: "DeFi withdraw (Tezcatli, ~930K)",
+  cashout: "Cashout / xc-cashout (~760K)",
+  cashin: "Cash-in / sweep / unshield (~500-630K)",
+  other: "Other (<450K)",
 };
 
 export default async function GasPage({ searchParams }: { searchParams: { period?: string } }) {

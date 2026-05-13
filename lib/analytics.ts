@@ -38,28 +38,38 @@ export function hourOfDay<T extends Stamped>(events: T[]): { hour: number; count
 }
 
 /**
- * Classify a UserOp by its gas used into a coarse bucket. The exact decoder
- * would inspect calldata, but the gas-used distribution is a pretty good
- * proxy for the V6.5 op shapes.
+ * Classify a UserOp by its gas used into a coarse bucket. Decoder-free
+ * heuristic — buckets calibrated against the V6.5 super-run benchmark
+ * (/Z0tz/benchmarks/2026-05-02-v65-defi-super.md):
+ *
+ *   defi-tezcatli-deposit   ~1.71M gas
+ *   defi-tezcatli-withdraw  ~929K
+ *   xc-cashout              ~761K
+ *   defi-ledger-cashout     ~761K
+ *   cashin (V2 sweep)       ~633K
+ *   dst-sweep-to-ledger     ~530K
+ *   stealth-unshield        ~500K
+ *
+ * Don't read too much into individual classifications — these are buckets
+ * for the donut, not authoritative op types. Cross-reference the tx hash
+ * on the explorer for exact decode.
  */
-export type OpClass = "deploy" | "cashin" | "cashout" | "spend" | "rotate" | "other";
+export type OpClass = "defiDeposit" | "defiWithdraw" | "cashout" | "cashin" | "other";
 
 const OP_CLASS_COLORS: Record<OpClass, string> = {
-  deploy: "#a78bfa",
-  cashin: "#34d399",
-  spend: "#60a5fa",
+  defiDeposit: "#a78bfa",
+  defiWithdraw: "#f472b6",
   cashout: "#fbbf24",
-  rotate: "#f472b6",
+  cashin: "#34d399",
   other: "#6b7280",
 };
 
 export function classifyByGas(gasUsed: bigint): OpClass {
   const g = Number(gasUsed);
-  if (g >= 1_500_000) return "deploy"; // deploy + first op
-  if (g >= 700_000) return "cashout"; // cashout + rotate
-  if (g >= 500_000) return "spend"; // internal spend
-  if (g >= 400_000) return "rotate";
-  if (g >= 250_000) return "cashin"; // creditFromVault
+  if (g >= 1_500_000) return "defiDeposit";   // ~1.71M Tezcatli deposit
+  if (g >= 900_000)  return "defiWithdraw";   // ~929K Tezcatli withdraw
+  if (g >= 700_000)  return "cashout";        // ~761K xc-cashout / defi-ledger-cashout
+  if (g >= 450_000)  return "cashin";         // ~633K V2 sweep, ~530K dst-sweep, ~500K unshield
   return "other";
 }
 

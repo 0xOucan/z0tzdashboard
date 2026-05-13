@@ -12,6 +12,7 @@ import { ExplorerLink } from "@/components/ExplorerLink";
 import { getPaymasterOps, getOperationalBalances } from "@/lib/events";
 import { bucketDailyEth, filterByPeriod, sumGasCost, totalsByChain } from "@/lib/aggregate";
 import { cumulative, bucketByOpClass, opClassColor, classifyByGas } from "@/lib/analytics";
+import { BENCHMARK } from "@/lib/benchmarks";
 import { SUPPORTED_CHAINS, type SupportedChainId } from "@/lib/rpc";
 import { fmtEth, fmtUsd, fmtFixed, fmtDuration } from "@/lib/format";
 import { getEthPriceUsd } from "@/lib/prices";
@@ -76,6 +77,25 @@ export default async function GasPage({ searchParams }: { searchParams: { period
       color: opClassColor(b.klass),
       count: b.count,
     }));
+
+  // Benchmark vs observed — for each benchmarked op-class, compute observed
+  // avg gas (using ALL paymaster events, not just the current period) and
+  // surface the drift percentage.
+  const observedByClass = new Map<string, { totalGas: bigint; count: number }>();
+  for (const op of allOps) {
+    const k = classifyByGas(op.actualGasUsed);
+    const cur = observedByClass.get(k) ?? { totalGas: 0n, count: 0 };
+    cur.totalGas += op.actualGasUsed;
+    cur.count += 1;
+    observedByClass.set(k, cur);
+  }
+  const benchmarkRows = BENCHMARK.ops.map((b) => {
+    const obs = observedByClass.get(b.klass);
+    const observedAvg = obs && obs.count > 0 ? Number(obs.totalGas) / obs.count : null;
+    const drift =
+      observedAvg !== null ? ((observedAvg - b.avgGas) / b.avgGas) * 100 : null;
+    return { ...b, observedAvg, observedCount: obs?.count ?? 0, drift };
+  });
 
   // Avg gas cost per op trend (daily mean)
   const avgGasTrend = (() => {
@@ -289,6 +309,71 @@ export default async function GasPage({ searchParams }: { searchParams: { period
             · same address on all three chains
           </div>
         </div>
+      </div>
+
+      <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
+        <h3 className="font-medium mb-1">Benchmark vs observed</h3>
+        <p className="text-xs text-text-muted mb-4">
+          Reference gas numbers from the {BENCHMARK.runDate} V6.5 + Tezcatli super-run (
+          <a
+            href="https://github.com/0xOucan/Z0tz/blob/main/benchmarks/2026-05-02-v65-defi-super.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:text-accent"
+          >
+            benchmark
+          </a>
+          ) vs the dashboard's observed all-time averages per op-class. Drift &gt; ±10%
+          on a stable op-type usually signals a contract regression or a chain-side gas
+          model change.
+        </p>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wider text-text-muted border-b border-border">
+              <th className="pb-2 font-normal">Op (benchmark phase)</th>
+              <th className="pb-2 font-normal text-right">Benchmark avg gas</th>
+              <th className="pb-2 font-normal text-right">Observed avg gas</th>
+              <th className="pb-2 font-normal text-right">Observed count</th>
+              <th className="pb-2 font-normal text-right">Drift</th>
+            </tr>
+          </thead>
+          <tbody>
+            {benchmarkRows.map((row) => {
+              const driftClass =
+                row.drift === null
+                  ? "text-text-subtle"
+                  : Math.abs(row.drift) <= 10
+                  ? "text-accent-green"
+                  : Math.abs(row.drift) <= 25
+                  ? "text-accent-amber"
+                  : "text-accent-red";
+              return (
+                <tr key={row.klass} className="border-b border-border last:border-0">
+                  <td className="py-3">
+                    <div className="font-medium">{row.label}</div>
+                    <div className="text-[11px] text-text-muted">Phase {row.phases}</div>
+                  </td>
+                  <td className="py-3 text-right tabular-nums">
+                    {(row.avgGas / 1000).toFixed(0)}K
+                  </td>
+                  <td className="py-3 text-right tabular-nums">
+                    {row.observedAvg !== null
+                      ? `${(row.observedAvg / 1000).toFixed(0)}K`
+                      : "—"}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    {row.observedCount}
+                  </td>
+                  <td className={"py-3 text-right tabular-nums font-medium " + driftClass}>
+                    {row.drift !== null
+                      ? `${row.drift > 0 ? "+" : ""}${row.drift.toFixed(1)}%`
+                      : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       {recentFails.length > 0 && (

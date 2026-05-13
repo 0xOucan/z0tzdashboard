@@ -18,6 +18,7 @@ import { fmtEth, fmtUsd, fmtFixed, fmtDuration } from "@/lib/format";
 import { getEthPriceUsd } from "@/lib/prices";
 import { Fuel, Wallet, AlertTriangle, CheckCircle2, TrendingUp, XCircle } from "lucide-react";
 import { ADDRESSES } from "@/lib/addresses";
+import { getAllRelayerCashFlows } from "@/lib/explorerApi";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
@@ -54,11 +55,13 @@ export default async function GasPage({ searchParams }: { searchParams: { period
   const totalRelayerInUsd = (Number(totalRelayerIn) / 1e18) * ethUsd;
   const totalOutCount = relayerFlows.reduce((a, f) => a + f.outflowTxCount, 0);
   const totalInCount = relayerFlows.reduce((a, f) => a + f.inflowTxCount, 0);
-  const totalTreasuryCostUsd = ((Number(totalGasCost) / 1e18) * ethUsd) + totalRelayerNetUsd;
+  // totalTreasuryCostUsd is computed after `totalGasCost` is in scope below.
 
   const allOps = paymasterPerChain.flat();
   const ops = filterByPeriod(allOps, period);
+  // Derived after `totalGasCost` is computed below.
   const totalGasCost = sumGasCost(ops);
+  const totalTreasuryCostUsd = (Number(totalGasCost) / 1e18) * ethUsd + totalRelayerNetUsd;
   const successful = ops.filter((o) => o.success);
   const failed = ops.filter((o) => !o.success);
   const successRate = ops.length > 0 ? (successful.length / ops.length) * 100 : 100;

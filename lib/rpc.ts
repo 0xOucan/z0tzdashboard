@@ -71,8 +71,5 @@ export function makeTransport(chainId: number): Transport {
   if (pool.length === 0) {
     throw new Error(`No RPC pool configured for chain ${chainId}`);
   }
-  return fallback(
-    pool.map((u) => http(u, { timeout: 12_000 })),
-    { shouldThrow: () => false, retryCount: 2 }
-  );
+  return fallback(pool.map((u) => http(u, { timeout: 12_000 })), { retryCount: 2 });
 }

@@ -8,6 +8,12 @@ const VIEM_CHAINS = {
   [CHAIN_IDS.ARB_SEPOLIA]: arbitrumSepolia,
 } as const;
 
+// `createPublicClient` returns a chain-specialized client whose generic
+// parameters carry the chain's transaction-format type. The cache Map uses
+// the bare `PublicClient` alias, which doesn't structurally match the
+// specialized return without an explicit cast — TS rejects the assignment
+// otherwise. Functionally identical at runtime; the cast just collapses the
+// generics so the cache can hold any chain's client.
 const clientCache = new Map<SupportedChainId, PublicClient>();
 
 export function publicClient(chainId: SupportedChainId): PublicClient {
@@ -17,7 +23,7 @@ export function publicClient(chainId: SupportedChainId): PublicClient {
     chain: VIEM_CHAINS[chainId],
     transport: makeTransport(chainId),
     batch: { multicall: true },
-  });
+  }) as PublicClient;
   clientCache.set(chainId, client);
   return client;
 }

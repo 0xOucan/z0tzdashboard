@@ -1,44 +1,38 @@
 /**
- * Etherscan-family API client. Used to fetch native-ETH tx history for the
- * relayer EOA, since native transfers don't emit logs (so eth_getLogs can't
- * find them).
+ * Etherscan V2 unified API client. As of Sep 2024, Etherscan exposes a
+ * single endpoint (`https://api.etherscan.io/v2/api?chainid=<id>&...`) that
+ * authenticates ONE key against every Etherscan-family chain (Ethereum,
+ * Base, Arbitrum, etc.) on both mainnet and Sepolia. We hit that endpoint
+ * first.
  *
- * Etherscan V2 (Sep 2024) unified the API — a single ETHERSCAN_API_KEY now
- * authenticates against Etherscan, BaseScan, AND Arbiscan across mainnet
- * and testnets. Per-explorer overrides (BASESCAN_API_KEY / ARBISCAN_API_KEY)
- * are still supported if you ever want different keys per chain.
+ * Per-chain v1 fallback (`api-sepolia.basescan.org/api`, etc.) only fires
+ * if a per-chain key is explicitly set (BASESCAN_API_KEY / ARBISCAN_API_KEY).
+ * That path requires the matching native key — basescan.org rejects an
+ * etherscan.io v1 key.
  *
- * Without any key: the function returns null and the relayer-outflow panel
+ * Without any key the function returns null and the relayer-outflow panel
  * shows "API key not configured" instead of crashing.
  */
 import { SUPPORTED_CHAINS, type SupportedChainId, CHAIN_IDS } from "./rpc";
 import { ADDRESSES } from "./addresses";
 import { cached } from "./cache";
 
-const EXPLORER_API: Record<SupportedChainId, { base: string; perChainEnv: string }> = {
+const V2_BASE = "https://api.etherscan.io/v2/api";
+
+const V1_FALLBACK: Record<SupportedChainId, { base: string; perChainEnv: string }> = {
   [CHAIN_IDS.BASE_SEPOLIA]: {
     base: "https://api-sepolia.basescan.org/api",
     perChainEnv: "BASESCAN_API_KEY",
   },
   [CHAIN_IDS.ETH_SEPOLIA]: {
     base: "https://api-sepolia.etherscan.io/api",
-    perChainEnv: "ETHERSCAN_API_KEY", // same env as the universal fallback
+    perChainEnv: "ETHERSCAN_V1_API_KEY",
   },
   [CHAIN_IDS.ARB_SEPOLIA]: {
     base: "https://api-sepolia.arbiscan.io/api",
     perChainEnv: "ARBISCAN_API_KEY",
   },
 };
-
-/** Resolve the API key: per-chain env if set, else universal ETHERSCAN_API_KEY. */
-function resolveKey(chainId: SupportedChainId): string | null {
-  const cfg = EXPLORER_API[chainId];
-  return (
-    process.env[cfg.perChainEnv]?.trim() ||
-    process.env.ETHERSCAN_API_KEY?.trim() ||
-    null
-  );
-}
 
 type ExplorerTx = {
   hash: string;
@@ -56,22 +50,50 @@ async function fetchTxList(
   chainId: SupportedChainId,
   address: string
 ): Promise<ExplorerTx[] | null> {
-  const cfg = EXPLORER_API[chainId];
-  const apiKey = resolveKey(chainId);
-  if (!apiKey) return null;
+  const v2Key = process.env.ETHERSCAN_API_KEY?.trim();
+  if (v2Key) {
+    const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          status: string;
+          message: string;
+          result: ExplorerTx[] | string;
+        };
+        if (data.status === "1" && Array.isArray(data.result)) return data.result;
+        if (data.status === "0" && Array.isArray(data.result)) return [];
+        // status=0 with string result ("Invalid API Key", "Max rate limit reached", etc.)
+        console.warn(
+          `explorerApi V2 rejected for chain ${chainId}: ${data.message ?? "unknown"}; result=${
+            typeof data.result === "string" ? data.result : JSON.stringify(data.result).slice(0, 80)
+          }`
+        );
+      } else {
+        console.warn(`explorerApi V2 HTTP ${res.status} for chain ${chainId}`);
+      }
+    } catch (err) {
+      console.warn(`explorerApi V2 fetch failed for chain ${chainId}:`, (err as Error).message);
+    }
+    // V2 attempted but failed — only fall through to v1 if a per-chain key
+    // is explicitly set (otherwise we'd just bombard another endpoint with
+    // the same likely-bad key).
+  }
 
-  const url = `${cfg.base}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${apiKey}`;
+  const v1cfg = V1_FALLBACK[chainId];
+  const v1Key = process.env[v1cfg.perChainEnv]?.trim();
+  if (!v1Key) return null;
 
+  const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return null;
     const data = (await res.json()) as { status: string; message: string; result: ExplorerTx[] | string };
-    // Etherscan returns status="0" with message "No transactions found" when empty
     if (data.status === "0" && Array.isArray(data.result)) return [];
     if (data.status !== "1") return null;
     return data.result as ExplorerTx[];
   } catch (err) {
-    console.warn(`explorerApi.fetchTxList(${chainId}, ${address}) failed:`, (err as Error).message);
+    console.warn(`explorerApi V1 fetch failed for chain ${chainId}:`, (err as Error).message);
     return null;
   }
 }
@@ -88,17 +110,15 @@ export type DestinationFlow = {
 
 export type RelayerCashFlow = {
   chainId: SupportedChainId;
-  /** Has the explorer API key been configured for this chain? */
+  /** Has any explorer API key been configured AND accepted for this chain? */
   available: boolean;
   /** Native ETH sent FROM the relayer (to stealths and elsewhere), wei. */
   outflow: bigint;
   /** Native ETH received BY the relayer (dust returns + replenishments), wei. */
   inflow: bigint;
-  /** Net spent: outflow − inflow. Negative would mean replenished more than spent. */
   netSpent: bigint;
   outflowTxCount: number;
   inflowTxCount: number;
-  /** Per-destination breakdown — unique addresses on the other side of the relayer's txs. */
   destinations: DestinationFlow[];
 };
 
@@ -158,7 +178,6 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         byAddr.set(fromLc, cur);
       }
     }
-    // Finalize netSpent per destination.
     const destinations = Array.from(byAddr.values()).map((d) => ({
       ...d,
       netSpent: d.outflow - d.inflow,

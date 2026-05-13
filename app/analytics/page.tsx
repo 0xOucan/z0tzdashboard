@@ -1,7 +1,7 @@
 import { PageHeader } from "@/components/PageHeader";
 import { KpiCard } from "@/components/KpiCard";
 import { PeriodSelector } from "@/components/PeriodSelector";
-import { parsePeriod } from "@/components/period";
+import { parsePeriod, PERIOD_DAYS } from "@/components/period";
 import { ChainBadge } from "@/components/ChainBadge";
 import { ChainLegend } from "@/components/charts/Legend";
 import { StackedAreaChart } from "@/components/charts/StackedAreaChart";
@@ -24,8 +24,6 @@ import { TrendingUp, DollarSign, Activity, Sigma } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
-
-const PERIOD_DAYS: Record<string, number> = { "24h": 1, "7d": 7, "30d": 30, all: 30 };
 
 export default async function AnalyticsPage({
   searchParams,

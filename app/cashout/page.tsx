@@ -1,7 +1,7 @@
 import { PageHeader } from "@/components/PageHeader";
 import { KpiCard } from "@/components/KpiCard";
 import { PeriodSelector } from "@/components/PeriodSelector";
-import { parsePeriod } from "@/components/period";
+import { parsePeriod, PERIOD_DAYS } from "@/components/period";
 import { ChainLegend } from "@/components/charts/Legend";
 import { StackedBarChart } from "@/components/charts/StackedBarChart";
 import { EventTable } from "@/components/EventTable";
@@ -14,8 +14,6 @@ import { ArrowUpFromLine } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60;
-
-const PERIOD_DAYS: Record<string, number> = { "24h": 1, "7d": 7, "30d": 30, all: 30 };
 
 export default async function CashOutPage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);

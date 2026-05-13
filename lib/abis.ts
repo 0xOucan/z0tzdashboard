@@ -78,19 +78,31 @@ export const ERC20_ABI = [
   },
 ] as const satisfies Abi;
 
+/**
+ * Circle CCTP V2 `DepositForBurn` event. The V1 signature had `nonce` indexed
+ * and lacked `maxFee`, `minFinalityThreshold`, `hookData`. V2 dropped the
+ * indexed `nonce`, promoted `mintRecipient` to indexed, and appended the
+ * three new fields — so V1-shaped ABIs silently miss every V2 burn (the
+ * topic hash differs).
+ *
+ * Z0tz uses CCTP V2 (TokenMessengerV2 at 0x8FE6…2DAA — see
+ * cli/dist/core/cctp.js). This ABI matches V2's emit signature.
+ */
 export const CCTP_ABI = [
   {
     type: "event",
     name: "DepositForBurn",
     inputs: [
-      { name: "nonce", type: "uint64", indexed: true },
       { name: "burnToken", type: "address", indexed: true },
       { name: "amount", type: "uint256", indexed: false },
       { name: "depositor", type: "address", indexed: true },
-      { name: "mintRecipient", type: "bytes32", indexed: false },
+      { name: "mintRecipient", type: "bytes32", indexed: true },
       { name: "destinationDomain", type: "uint32", indexed: false },
       { name: "destinationTokenMessenger", type: "bytes32", indexed: false },
       { name: "destinationCaller", type: "bytes32", indexed: false },
+      { name: "maxFee", type: "uint256", indexed: false },
+      { name: "minFinalityThreshold", type: "uint32", indexed: false },
+      { name: "hookData", type: "bytes", indexed: false },
     ],
   },
 ] as const satisfies Abi;

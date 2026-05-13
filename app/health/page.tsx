@@ -17,6 +17,11 @@ import {
   getOfacCounts,
   getDepositorCounts,
 } from "@/lib/tezcatli";
+import {
+  scanGovernance,
+  openRecoveries,
+  legacySweeperState,
+} from "@/lib/governance";
 import { ADDRESSES } from "@/lib/addresses";
 import { SUPPORTED_CHAINS, type SupportedChainId, CHAIN_META } from "@/lib/rpc";
 import { fmtEth, fmtDuration } from "@/lib/format";
@@ -68,6 +73,7 @@ export default async function HealthPage() {
     kycCounts,
     ofacCounts,
     depositorCounts,
+    govEvents,
   ] = await Promise.all([
     getChainHealth(),
     getOperationalBalances(),
@@ -80,7 +86,12 @@ export default async function HealthPage() {
     getKycCounts(),
     getOfacCounts(),
     getDepositorCounts(),
+    scanGovernance(),
   ]);
+
+  // Surface governance-derived alerts on top of the existing health checks.
+  const openRecoveryList = openRecoveries(govEvents);
+  const legacyStates = legacySweeperState(govEvents);
 
   const opsAll = allOps.flat();
   const allChainsOk = chains.every((c) => c.ok);
@@ -163,6 +174,22 @@ export default async function HealthPage() {
         chainId: c.chainId,
         severity: "warn",
         message: `Latest block on ${CHAIN_META[c.chainId].name} is ${fmtDuration(c.ageSeconds)} old — chain may be stalled.`,
+      });
+    }
+  }
+  for (const r of openRecoveryList) {
+    alerts.push({
+      chainId: r.chainId,
+      severity: "crit",
+      message: `Open recovery on account ${String(r.args.account ?? "").slice(0, 10)}… — security review required.`,
+    });
+  }
+  for (const ls of legacyStates) {
+    if (ls.enabled) {
+      alerts.push({
+        chainId: ls.chainId,
+        severity: "crit",
+        message: `Sweeper V1 LEGACY PATH enabled on ${CHAIN_META[ls.chainId].name} — re-exposes the C-1 ciphertext-substitution attack surface.`,
       });
     }
   }

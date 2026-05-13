@@ -306,6 +306,150 @@ export const DEPOSITOR_REGISTRY_ABI = [
 // Stealth meta-contracts (ERC-5564 / ERC-6538)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Governance / admin / security events
+// ---------------------------------------------------------------------------
+
+export const RECOVERY_MODULE_ABI = [
+  {
+    type: "event",
+    name: "RecoveryInitiated",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "newOwnerX", type: "uint256", indexed: false },
+      { name: "newOwnerY", type: "uint256", indexed: false },
+      { name: "executeAfter", type: "uint64", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "RecoveryFinalized",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "newOwnerX", type: "uint256", indexed: false },
+      { name: "newOwnerY", type: "uint256", indexed: false },
+      { name: "epoch", type: "uint64", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "RecoveryCancelled",
+    inputs: [{ name: "account", type: "address", indexed: true }],
+  },
+  {
+    type: "event",
+    name: "GuardiansRotated",
+    inputs: [
+      { name: "account", type: "address", indexed: true },
+      { name: "epoch", type: "uint64", indexed: false },
+    ],
+  },
+] as const satisfies Abi;
+
+export const PAYMASTER_ADMIN_ABI = [
+  {
+    type: "event",
+    name: "ConfigUpdated",
+    inputs: [
+      { name: "feeRateBps", type: "uint256", indexed: false },
+      { name: "maxFeeCap", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "TreasuryUpdated",
+    inputs: [{ name: "treasury", type: "address", indexed: false }],
+  },
+  {
+    type: "event",
+    name: "OperatorUpdated",
+    inputs: [{ name: "operator", type: "address", indexed: false }],
+  },
+  {
+    type: "event",
+    name: "WhitelistEnabledSet",
+    inputs: [{ name: "enabled", type: "bool", indexed: false }],
+  },
+  {
+    type: "event",
+    name: "TargetApproved",
+    inputs: [
+      { name: "target", type: "address", indexed: false },
+      { name: "approved", type: "bool", indexed: false },
+    ],
+  },
+] as const satisfies Abi;
+
+export const SWEEPER_ADMIN_ABI = [
+  {
+    type: "event",
+    name: "TreasurySet",
+    inputs: [{ name: "treasury", type: "address", indexed: true }],
+  },
+  {
+    type: "event",
+    name: "LegacyEnabledSet",
+    inputs: [{ name: "enabled", type: "bool", indexed: false }],
+  },
+] as const satisfies Abi;
+
+export const LEDGER_LOCK_ABI = [
+  {
+    type: "event",
+    name: "Locked",
+    inputs: [],
+  },
+] as const satisfies Abi;
+
+export const TEZCATLI_VAULT_ADMIN_ABI = [
+  {
+    type: "event",
+    name: "StrategyAdapterUpdated",
+    inputs: [
+      { name: "previousAdapter", type: "address", indexed: true },
+      { name: "newAdapter", type: "address", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "ComplianceGateUpdated",
+    inputs: [
+      { name: "complianceGate", type: "address", indexed: true },
+      { name: "enabled", type: "bool", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "FeeModelUpdated",
+    inputs: [
+      { name: "previousFeeModel", type: "address", indexed: true },
+      { name: "newFeeModel", type: "address", indexed: true },
+    ],
+  },
+  {
+    type: "event",
+    name: "MinWithdrawDelayUpdated",
+    inputs: [
+      { name: "previousDelay", type: "uint64", indexed: false },
+      { name: "newDelay", type: "uint64", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "SettlementPendingUpdated",
+    inputs: [{ name: "status", type: "bool", indexed: false }],
+  },
+  {
+    type: "event",
+    name: "EmergencyTokenRecovered",
+    inputs: [
+      { name: "token", type: "address", indexed: true },
+      { name: "to", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+] as const satisfies Abi;
+
 export const STEALTH_ANNOUNCER_ABI = [
   {
     type: "event",

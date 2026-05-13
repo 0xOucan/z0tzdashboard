@@ -13,6 +13,7 @@ import {
   FileCode2,
   Activity,
   TrendingUp,
+  ShieldAlert,
 } from "lucide-react";
 
 const NAV = [
@@ -24,6 +25,7 @@ const NAV = [
   { href: "/bridge", label: "Bridge", icon: ArrowLeftRight },
   { href: "/analytics", label: "Analytics", icon: TrendingUp },
   { href: "/health", label: "Health", icon: Activity },
+  { href: "/governance", label: "Governance", icon: ShieldAlert },
   { href: "/contracts", label: "Contracts", icon: FileCode2 },
 ];
 

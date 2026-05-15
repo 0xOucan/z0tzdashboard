@@ -413,3 +413,128 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
 export async function getAllRelayerCashFlows(): Promise<RelayerCashFlow[]> {
   return Promise.all(SUPPORTED_CHAINS.map((c) => getRelayerCashFlow(c)));
 }
+
+// ---------------------------------------------------------------------------
+// Treasury / deployer wallet — separate accounting from the relayer EOA.
+//
+// The treasury wallet (`ADDRESSES[chain].treasury`, same address on every
+// chain) is the source of funds that:
+//   1. Deployed every Z0tz contract (one-time gas cost per chain)
+//   2. Top-up the paymaster's EntryPoint deposit (via depositTo)
+//   3. Pays for admin ops (Set Operator, Lock, Set Risk Policy, etc.)
+//
+// Without this view the dashboard couldn't show "how much has been allocated
+// to the paymaster pool" vs "how much has been drained" — only the drain
+// side (UserOperationEvent.actualGasCost) was visible.
+// ---------------------------------------------------------------------------
+
+export type TreasuryCashFlow = {
+  chainId: SupportedChainId;
+  available: boolean;
+  meta: ExplorerMeta;
+  /** ETH sent FROM treasury → EntryPoint (paymaster pool deposits). */
+  paymasterFunding: bigint;
+  paymasterFundingTxCount: number;
+  /** Gas paid for contract creations (tx.to is empty). One-time setup cost. */
+  deploymentGas: bigint;
+  deploymentTxCount: number;
+  /** Gas paid for non-deploy txs (admin ops, transfers, etc.). */
+  operationalGas: bigint;
+  operationalTxCount: number;
+  /** Sum of every tx fee (deploymentGas + operationalGas), wei. */
+  totalGasPaid: bigint;
+  /** Non-paymaster ETH transfers FROM treasury (excluding gas). */
+  otherOutflow: bigint;
+  otherOutflowTxCount: number;
+  /** ETH received BY treasury (external funding from faucets / multi-sig). */
+  inflow: bigint;
+  inflowTxCount: number;
+};
+
+export async function getTreasuryCashFlow(chainId: SupportedChainId): Promise<TreasuryCashFlow> {
+  return cached(`treasuryCashFlow:${chainId}`, 300, async () => {
+    const treasury = ADDRESSES[chainId].treasury.toLowerCase();
+    const entryPoint = ADDRESSES[chainId].entryPoint.toLowerCase();
+    const { txs, meta } = await fetchTxList(chainId, treasury);
+    if (txs === null) {
+      return {
+        chainId,
+        available: false,
+        meta,
+        paymasterFunding: 0n,
+        paymasterFundingTxCount: 0,
+        deploymentGas: 0n,
+        deploymentTxCount: 0,
+        operationalGas: 0n,
+        operationalTxCount: 0,
+        totalGasPaid: 0n,
+        otherOutflow: 0n,
+        otherOutflowTxCount: 0,
+        inflow: 0n,
+        inflowTxCount: 0,
+      };
+    }
+
+    let paymasterFunding = 0n;
+    let paymasterFundingTxCount = 0;
+    let deploymentGas = 0n;
+    let deploymentTxCount = 0;
+    let operationalGas = 0n;
+    let operationalTxCount = 0;
+    let otherOutflow = 0n;
+    let otherOutflowTxCount = 0;
+    let inflow = 0n;
+    let inflowTxCount = 0;
+
+    for (const tx of txs) {
+      const value = BigInt(tx.value || "0");
+      const gasFee = BigInt(tx.gasUsed || "0") * BigInt(tx.gasPrice || "0");
+      const fromLc = tx.from.toLowerCase();
+      const toLc = (tx.to || "").toLowerCase();
+
+      if (fromLc === treasury) {
+        // Outgoing tx — categorize.
+        const isContractCreation = toLc === "" || toLc === "0x0000000000000000000000000000000000000000";
+        if (isContractCreation) {
+          deploymentGas += gasFee;
+          deploymentTxCount += 1;
+        } else {
+          operationalGas += gasFee;
+          operationalTxCount += 1;
+        }
+        if (toLc === entryPoint && value > 0n) {
+          paymasterFunding += value;
+          paymasterFundingTxCount += 1;
+        } else if (value > 0n) {
+          otherOutflow += value;
+          otherOutflowTxCount += 1;
+        }
+      } else if (toLc === treasury && value > 0n) {
+        // Incoming external funding.
+        inflow += value;
+        inflowTxCount += 1;
+      }
+    }
+
+    return {
+      chainId,
+      available: true,
+      meta,
+      paymasterFunding,
+      paymasterFundingTxCount,
+      deploymentGas,
+      deploymentTxCount,
+      operationalGas,
+      operationalTxCount,
+      totalGasPaid: deploymentGas + operationalGas,
+      otherOutflow,
+      otherOutflowTxCount,
+      inflow,
+      inflowTxCount,
+    };
+  });
+}
+
+export async function getAllTreasuryCashFlows(): Promise<TreasuryCashFlow[]> {
+  return Promise.all(SUPPORTED_CHAINS.map((c) => getTreasuryCashFlow(c)));
+}

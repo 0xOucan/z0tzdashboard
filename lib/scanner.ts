@@ -30,7 +30,8 @@ import type { SupportedChainId } from "./rpc";
  * Falls back to the default 9000 for any chain not explicitly listed.
  */
 const CHUNK_SIZE_BY_CHAIN: Record<number, bigint> = {
-  421614: 4_500n, // arb-sepolia: smaller window, fewer HTTP failures
+  421614: 4_500n, // arb-sepolia: high tx density, half-window reduces timeouts
+  84532: 4_500n, // base-sepolia: similar story for Tezcatli vault scans
 };
 export const CHUNK_SIZE = 9_000n;
 function chunkSizeFor(chainId: number): bigint {

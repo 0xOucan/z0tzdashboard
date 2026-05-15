@@ -16,7 +16,22 @@
 import { SUPPORTED_CHAINS, type SupportedChainId, CHAIN_IDS } from "./rpc";
 import { ADDRESSES } from "./addresses";
 import { cached } from "./cache";
+import { readCheckpoint, writeCheckpoint } from "./persistent-cache";
 import { deploymentBlock } from "./deployment";
+
+/**
+ * Disk-cache the raw explorer API response for 1 hour per (chain, address).
+ * Etherscan V2 free tier caps at 3 req/sec; with multiple Vercel function
+ * instances spinning up, the in-memory cache + in-process rate limiter
+ * isn't enough — every new cold instance independently re-fetches. The
+ * disk cache means most invocations never even touch the API.
+ */
+const DISK_CACHE_TTL_MS = 3600_000; // 1 hour
+type DiskCachedFetch = {
+  fetchedAt: number;
+  source: "v2" | "v1";
+  txs: ExplorerTx[];
+};
 
 const V2_BASE = "https://api.etherscan.io/v2/api";
 
@@ -89,6 +104,16 @@ async function fetchTxList(
   //   2. Client-side filtering means we always have ground-truth tx
   //      counts to log + fall back on if the deployment-block lookup
   //      itself returned a bogus value.
+
+  // ── Disk-cache fast path ───────────────────────────────────────────
+  // If we have a recent successful tx-list on disk, skip the API entirely.
+  // This is what protects us from Etherscan's 3-req/sec free-tier cap
+  // when multiple Vercel function instances cold-start near-simultaneously.
+  const diskKey = `explorer-tx/${chainId}/${address.toLowerCase()}`;
+  const disk = await readCheckpoint<DiskCachedFetch>(diskKey);
+  if (disk && Date.now() - disk.fetchedAt < DISK_CACHE_TTL_MS) {
+    return applyDeployFilter(chainId, disk.txs, disk.source);
+  }
 
   const v2Key = process.env.ETHERSCAN_API_KEY?.trim();
   let txs: ExplorerTx[] | null = null;
@@ -164,9 +189,26 @@ async function fetchTxList(
     };
   }
 
-  // Client-side deployment-block filter. If the lookup returned something
-  // suspicious (after the wallet's newest tx) we log a warning and don't
-  // filter — better to show too much than show nothing.
+  // Successful fetch — persist before filtering so the next cold instance
+  // can apply the (possibly updated) deployment-block filter on its own.
+  void writeCheckpoint<DiskCachedFetch>(diskKey, {
+    fetchedAt: Date.now(),
+    source: source === "none" ? "v2" : source,
+    txs,
+  });
+
+  return applyDeployFilter(chainId, txs, source === "none" ? "v2" : source);
+}
+
+/**
+ * Apply the V6.5 deployment-block floor + build ExplorerMeta. Shared by
+ * the live-fetch and disk-cache-hit paths so we get consistent filtering.
+ */
+async function applyDeployFilter(
+  chainId: SupportedChainId,
+  txs: ExplorerTx[],
+  source: "v2" | "v1"
+): Promise<{ txs: ExplorerTx[]; meta: ExplorerMeta }> {
   const deployFrom = await deploymentBlock(chainId);
   const maxObservedBlock = txs.reduce((max, tx) => {
     const bn = BigInt(tx.blockNumber || "0");
@@ -194,7 +236,6 @@ async function fetchTxList(
       postDeployTxs: filtered.length,
       deploymentBlock: deployFrom,
       source,
-      rejection,
     },
   };
 }

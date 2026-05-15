@@ -40,6 +40,11 @@ const V2_BASE = "https://api.etherscan.io/v2/api";
  * fetchTxList in parallel on a cold start, we trivially blow that. This
  * lightweight in-process rate limiter enforces a minimum gap between V2
  * calls so we hit ~2.5 req/sec safely under the limit.
+ *
+ * The in-process limiter doesn't see across function instances — when
+ * multiple Vercel functions cold-start near-simultaneously they each fire
+ * independently. The retry-with-jitter in `fetchEtherscanV2` handles that
+ * cross-instance racing.
  */
 let lastV2CallTs = 0;
 const V2_MIN_GAP_MS = 400;
@@ -50,6 +55,49 @@ async function waitForV2Slot(): Promise<void> {
     await new Promise((r) => setTimeout(r, V2_MIN_GAP_MS - elapsed));
   }
   lastV2CallTs = Date.now();
+}
+
+type EtherscanResponse = {
+  status: string;
+  message: string;
+  result: unknown;
+};
+
+/**
+ * Etherscan V2 fetch with rate-limit retry. Returns the parsed JSON body
+ * or null on hard failure. On a `Max calls per sec` response, retries up
+ * to `maxRetries` times with exponential backoff + jitter to avoid
+ * thundering-herd from racing function instances.
+ */
+async function fetchEtherscanV2(
+  url: string,
+  maxRetries: number = 3
+): Promise<EtherscanResponse | null> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      // Exponential backoff with jitter so racing instances don't re-collide.
+      const base = 700 * Math.pow(2, attempt - 1); // 700, 1400, 2800 ms
+      const jitter = Math.random() * 400;
+      await new Promise((r) => setTimeout(r, base + jitter));
+    }
+    await waitForV2Slot();
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) return null;
+      const data = (await res.json()) as EtherscanResponse;
+      const result = typeof data.result === "string" ? data.result : "";
+      const isRateLimited =
+        data.status === "0" && result.toLowerCase().includes("rate limit");
+      if (isRateLimited && attempt < maxRetries) {
+        // Try again after backoff.
+        continue;
+      }
+      return data;
+    } catch {
+      if (attempt === maxRetries) return null;
+    }
+  }
+  return null;
 }
 
 const V1_FALLBACK: Record<SupportedChainId, { base: string; perChainEnv: string }> = {
@@ -122,30 +170,19 @@ async function fetchTxList(
 
   if (v2Key) {
     source = "v2";
-    await waitForV2Slot();
     const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
-    try {
-      const res = await fetch(url, { cache: "no-store" });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          status: string;
-          message: string;
-          result: ExplorerTx[] | string;
-        };
-        if (data.status === "1" && Array.isArray(data.result)) txs = data.result;
-        else if (data.status === "0" && Array.isArray(data.result)) txs = [];
-        else {
-          rejection = `V2 status=${data.status} message=${data.message ?? "unknown"} result=${
-            typeof data.result === "string" ? data.result : "[]"
-          }`;
-          console.warn(`explorerApi chain ${chainId}: ${rejection}`);
-        }
-      } else {
-        rejection = `V2 HTTP ${res.status}`;
-        console.warn(`explorerApi chain ${chainId}: ${rejection}`);
-      }
-    } catch (err) {
-      rejection = `V2 fetch threw: ${(err as Error).message}`;
+    const data = await fetchEtherscanV2(url);
+    if (data === null) {
+      rejection = "V2 hard failure (HTTP error or fetch threw after retries)";
+      console.warn(`explorerApi chain ${chainId}: ${rejection}`);
+    } else if (data.status === "1" && Array.isArray(data.result)) {
+      txs = data.result as ExplorerTx[];
+    } else if (data.status === "0" && Array.isArray(data.result)) {
+      txs = [];
+    } else {
+      rejection = `V2 status=${data.status} message=${data.message ?? "unknown"} result=${
+        typeof data.result === "string" ? data.result : "[]"
+      }`;
       console.warn(`explorerApi chain ${chainId}: ${rejection}`);
     }
   }

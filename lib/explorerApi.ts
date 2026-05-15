@@ -112,19 +112,51 @@ export type RelayerCashFlow = {
   chainId: SupportedChainId;
   /** Has any explorer API key been configured AND accepted for this chain? */
   available: boolean;
-  /** Native ETH sent FROM the relayer (to stealths and elsewhere), wei. */
+  /** Total native ETH sent FROM the relayer, all destinations, wei. */
   outflow: bigint;
-  /** Native ETH received BY the relayer (dust returns + replenishments), wei. */
+  /** Total native ETH received BY the relayer (dust returns + replenishments), wei. */
   inflow: bigint;
   netSpent: bigint;
   outflowTxCount: number;
   inflowTxCount: number;
+  /** Per-destination breakdown — unique addresses on the other side. */
   destinations: DestinationFlow[];
+
+  // ── Categorized outflows (subsets of outflow) ───────────────────
+  /**
+   * Relayer → EntryPoint or relayer → Paymaster contract. These are
+   * deposit top-ups into the paymaster's gas-sponsoring pool — NOT a
+   * realized cost. The cost manifests later as
+   * EntryPoint.UserOperationEvent.actualGasCost when the deposit drains.
+   * Counting this AND the paymaster gas would double-count.
+   */
+  paymasterTopUp: bigint;
+  paymasterTopUpTxCount: number;
+  /**
+   * Relayer → addresses that are NOT EntryPoint / paymaster contracts.
+   * Mostly stealth funding (cash-in stealths, CCTP burn stealths, DeFi
+   * stealths). This IS a real cost, net of dust returns.
+   */
+  stealthOutflow: bigint;
+  /** Inflows from addresses that ALSO received outflows from the relayer (dust returns). */
+  dustReturns: bigint;
+  /** stealthOutflow − dustReturns. The actual cost the relayer absorbed for stealth gas. */
+  stealthNetCost: bigint;
 };
 
 export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<RelayerCashFlow> {
   return cached(`relayerCashFlow:${chainId}`, 300, async () => {
     const relayer = ADDRESSES[chainId].relayerWallet.toLowerCase();
+    const entryPoint = ADDRESSES[chainId].entryPoint.toLowerCase();
+    const paymaster = ADDRESSES[chainId].paymaster.toLowerCase();
+    // Set of reserve-transfer destinations — ETH sent here is treasury
+    // movement, not realized cost. The paymaster's gas drain shows up
+    // separately via EntryPoint.UserOperationEvent.actualGasCost.
+    const reserveDestinations = new Set<string>([entryPoint]);
+    if (paymaster !== "0x0000000000000000000000000000000000000000") {
+      reserveDestinations.add(paymaster);
+    }
+
     const txs = await fetchTxList(chainId, relayer);
     if (txs === null) {
       return {
@@ -136,13 +168,23 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         outflowTxCount: 0,
         inflowTxCount: 0,
         destinations: [],
+        paymasterTopUp: 0n,
+        paymasterTopUpTxCount: 0,
+        stealthOutflow: 0n,
+        dustReturns: 0n,
+        stealthNetCost: 0n,
       };
     }
+
     let outflow = 0n;
     let inflow = 0n;
     let outCount = 0;
     let inCount = 0;
+    let paymasterTopUp = 0n;
+    let paymasterTopUpTxCount = 0;
+    let stealthOutflow = 0n;
     const byAddr = new Map<string, DestinationFlow>();
+
     for (const tx of txs) {
       const value = BigInt(tx.value || "0");
       if (value === 0n) continue;
@@ -151,6 +193,12 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
       if (fromLc === relayer) {
         outflow += value;
         outCount += 1;
+        if (reserveDestinations.has(toLc)) {
+          paymasterTopUp += value;
+          paymasterTopUpTxCount += 1;
+        } else {
+          stealthOutflow += value;
+        }
         const cur = byAddr.get(toLc) ?? {
           address: toLc as `0x${string}`,
           outflow: 0n,
@@ -178,10 +226,26 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         byAddr.set(fromLc, cur);
       }
     }
+
     const destinations = Array.from(byAddr.values()).map((d) => ({
       ...d,
       netSpent: d.outflow - d.inflow,
     }));
+
+    // Dust returns: inflows that came FROM an address we previously sent
+    // ETH to (i.e. a stealth we funded, returning leftover gas).
+    // Replenishments from the treasury are external (`from` address has
+    // no prior outflow from the relayer to it) and counted separately.
+    let dustReturns = 0n;
+    for (const d of destinations) {
+      if (d.outflow > 0n && d.inflow > 0n) {
+        // The address received an outflow AND sent something back. Cap
+        // the dust-return component at the outflow so we never claim
+        // "negative cost" if a depositor over-refunded.
+        dustReturns += d.inflow > d.outflow ? d.outflow : d.inflow;
+      }
+    }
+
     return {
       chainId,
       available: true,
@@ -191,6 +255,11 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
       outflowTxCount: outCount,
       inflowTxCount: inCount,
       destinations,
+      paymasterTopUp,
+      paymasterTopUpTxCount,
+      stealthOutflow,
+      dustReturns,
+      stealthNetCost: stealthOutflow > dustReturns ? stealthOutflow - dustReturns : 0n,
     };
   });
 }

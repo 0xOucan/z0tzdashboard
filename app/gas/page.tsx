@@ -67,6 +67,7 @@ export default async function GasPage({ searchParams }: { searchParams: { period
     .filter((d) => d.category === "unknown")
     .slice(0, 15);
   const explorerApiAvailable = relayerFlows.some((f) => f.available);
+  // Total outflows (gross) — for transparency, includes paymaster reserve transfers.
   const totalRelayerOut = relayerFlows.reduce(
     (a, f) => a + (f.available ? f.outflow : 0n),
     0n
@@ -75,12 +76,35 @@ export default async function GasPage({ searchParams }: { searchParams: { period
     (a, f) => a + (f.available ? f.inflow : 0n),
     0n
   );
-  const totalRelayerNet = totalRelayerOut - totalRelayerIn;
+  // Realized cost — stealth funding net of dust returns. Paymaster top-ups
+  // excluded (they're reserve transfers, not cost — the actual paymaster
+  // burn is already counted in totalGasCost via UserOperationEvent).
+  const totalRelayerNet = relayerFlows.reduce(
+    (a, f) => a + (f.available ? f.stealthNetCost : 0n),
+    0n
+  );
+  const totalPaymasterTopUp = relayerFlows.reduce(
+    (a, f) => a + (f.available ? f.paymasterTopUp : 0n),
+    0n
+  );
+  const totalDustReturns = relayerFlows.reduce(
+    (a, f) => a + (f.available ? f.dustReturns : 0n),
+    0n
+  );
+  const totalStealthOutflow = relayerFlows.reduce(
+    (a, f) => a + (f.available ? f.stealthOutflow : 0n),
+    0n
+  );
   const totalRelayerNetUsd = (Number(totalRelayerNet) / 1e18) * ethUsd;
   const totalRelayerOutUsd = (Number(totalRelayerOut) / 1e18) * ethUsd;
   const totalRelayerInUsd = (Number(totalRelayerIn) / 1e18) * ethUsd;
+  const totalPaymasterTopUpUsd = (Number(totalPaymasterTopUp) / 1e18) * ethUsd;
   const totalOutCount = relayerFlows.reduce((a, f) => a + f.outflowTxCount, 0);
   const totalInCount = relayerFlows.reduce((a, f) => a + f.inflowTxCount, 0);
+  const totalPaymasterTopUpCount = relayerFlows.reduce(
+    (a, f) => a + f.paymasterTopUpTxCount,
+    0
+  );
   // totalTreasuryCostUsd is computed after `totalGasCost` is in scope below.
 
   const allOps = paymasterPerChain.flat();
@@ -286,13 +310,15 @@ export default async function GasPage({ searchParams }: { searchParams: { period
               value={ADDRESSES[SUPPORTED_CHAINS[0]].relayerWallet}
               type="address"
             />
-            ) sent directly to stealths so they could sign their own txs (CCTP
-            burns, manual unshield claims, dust returns).
+            ) sent to stealths so they could sign their own txs. Paymaster
+            top-ups are tracked separately — those are treasury reserve
+            transfers, not realized cost (the actual paymaster spend is
+            already captured by UserOperationEvent.actualGasCost above).
           </p>
           {explorerApiAvailable ? (
             <div className="space-y-3 text-sm">
               <div className="flex justify-between">
-                <span className="text-text-muted">Outflow (to stealths)</span>
+                <span className="text-text-muted">Gross outflow (all destinations)</span>
                 <span className="tabular-nums">
                   {fmtEth(totalRelayerOut)} ETH
                   <span className="text-text-muted ml-2 text-xs">
@@ -301,26 +327,32 @@ export default async function GasPage({ searchParams }: { searchParams: { period
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-text-muted">Inflow (dust returns)</span>
-                <span className="tabular-nums text-accent-green">
-                  +{fmtEth(totalRelayerIn)} ETH
+                <span className="text-text-muted">↳ Paymaster pool top-up (reserve)</span>
+                <span className="tabular-nums text-text-muted">
+                  −{fmtEth(totalPaymasterTopUp)} ETH
                   <span className="text-text-muted ml-2 text-xs">
-                    ({fmtUsd(totalRelayerInUsd)})
+                    ({totalPaymasterTopUpCount} tx, not a cost)
                   </span>
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-text-muted">Top-up txs / return txs</span>
+                <span className="text-text-muted">↳ To stealths (gross)</span>
                 <span className="tabular-nums">
-                  {totalOutCount} / {totalInCount}
+                  {fmtEth(totalStealthOutflow)} ETH
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-muted">Dust returns from stealths</span>
+                <span className="tabular-nums text-accent-green">
+                  +{fmtEth(totalDustReturns)} ETH
                 </span>
               </div>
               <div className="flex justify-between border-t border-border pt-3">
-                <span className="text-text-muted font-medium">Net ETH spent</span>
+                <span className="text-text-muted font-medium">Realized cost (stealth net)</span>
                 <span className="tabular-nums font-medium">{fmtEth(totalRelayerNet)} ETH</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-text-muted font-medium">Net USD</span>
+                <span className="text-text-muted font-medium">Realized cost USD</span>
                 <span className="tabular-nums font-medium text-accent-red">
                   {fmtUsd(totalRelayerNetUsd)}
                 </span>

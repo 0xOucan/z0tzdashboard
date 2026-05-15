@@ -34,7 +34,7 @@ export default async function CashInPage({ searchParams }: { searchParams: { per
     ]);
   const explorerApiAvailable = relayerFlows.some((f) => f.available);
   const relayerNetDirectSpendWei = relayerFlows.reduce(
-    (acc, f) => acc + (f.available ? f.netSpent : 0n),
+    (acc, f) => acc + (f.available ? f.stealthNetCost : 0n),
     0n
   );
 

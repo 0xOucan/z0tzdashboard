@@ -26,7 +26,11 @@ import {
 import { incrementalScan } from "./incremental";
 import { publicClient } from "./chains";
 
-const CACHE_TTL = 60;
+// Bumped from 60s to 5min — events are immutable past finality and the
+// incremental scanner only fetches the block-range delta anyway, so a
+// stale-by-5-min cache hit is functionally identical to a fresh scan
+// while massively cutting page-load latency on warm Vercel instances.
+const CACHE_TTL = 300;
 const ZERO = "0x0000000000000000000000000000000000000000";
 
 // Re-exports for downstream readers

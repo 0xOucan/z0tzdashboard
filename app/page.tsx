@@ -53,8 +53,14 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
   ]);
 
   const explorerApiAvailable = relayerFlows.some((f) => f.available);
+  // Use stealthNetCost (outflow to non-paymaster destinations minus dust
+  // returns) — paymaster top-ups would double-count the gas burn.
   const relayerNetDirectSpendWei = relayerFlows.reduce(
-    (acc, f) => acc + (f.available ? f.netSpent : 0n),
+    (acc, f) => acc + (f.available ? f.stealthNetCost : 0n),
+    0n
+  );
+  const totalPaymasterTopUpWei = relayerFlows.reduce(
+    (acc, f) => acc + (f.available ? f.paymasterTopUp : 0n),
     0n
   );
 
@@ -190,8 +196,8 @@ export default async function Page({ searchParams }: { searchParams: { period?: 
             </div>
             <div className="text-[11px] text-text-muted">
               {explorerApiAvailable
-                ? `${fmtEth(relayerNetDirectSpendWei)} ETH net (out − dust returns)`
-                : "Set ETHERSCAN/BASESCAN/ARBISCAN_API_KEY"}
+                ? `${fmtEth(relayerNetDirectSpendWei)} ETH net · paymaster top-ups (${fmtEth(totalPaymasterTopUpWei)}) excluded`
+                : "Set ETHERSCAN_API_KEY"}
             </div>
           </div>
           <div>

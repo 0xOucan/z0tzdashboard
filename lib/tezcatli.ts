@@ -19,7 +19,7 @@ import { cached } from "./cache";
 import { SUPPORTED_CHAINS, type SupportedChainId } from "./rpc";
 import { incrementalScan } from "./incremental";
 
-const CACHE_TTL = 60;
+const CACHE_TTL = 300; // 5 min — see lib/events.ts for rationale
 
 // Internal event row shape — all incremental scans must return at least these
 // fields so withBlockTimestamps / disk serialization line up.

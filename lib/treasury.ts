@@ -22,9 +22,10 @@ export type TreasurySnapshot = {
   /** Paymaster gas burn (via EntryPoint UserOperationEvent), wei. */
   gasSpentWei: bigint;
   /**
-   * Net ETH the relayer EOA has sent directly to stealths (outflow − dust
-   * returns), wei. Captured from explorer API tx history; will be 0n when
-   * the explorer API keys aren't configured.
+   * Net ETH the relayer EOA has sent directly TO STEALTHS (outflow − dust
+   * returns), wei. EXCLUDES paymaster top-ups (those are reserve movements,
+   * not realized cost — counting them would double-count the paymaster's
+   * actualGasCost). Captured from explorer API; 0n if API key unavailable.
    */
   relayerDirectSpendWei?: bigint;
   /** Total cash-in volume, in USDC 6-decimal units. */

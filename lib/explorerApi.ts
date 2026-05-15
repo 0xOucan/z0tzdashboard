@@ -47,10 +47,23 @@ type ExplorerTx = {
   isError: "0" | "1";
 };
 
+/**
+ * Diagnostic about how the explorer-API call landed for a chain. Surfaced on
+ * /gas so when numbers look wrong we can see WHERE in the pipeline data was
+ * lost (API rejected? filter too aggressive? no txs at all?).
+ */
+export type ExplorerMeta = {
+  totalTxs: number;
+  postDeployTxs: number;
+  deploymentBlock: bigint | null;
+  source: "v2" | "v1" | "none";
+  rejection?: string;
+};
+
 async function fetchTxList(
   chainId: SupportedChainId,
   address: string
-): Promise<ExplorerTx[] | null> {
+): Promise<{ txs: ExplorerTx[] | null; meta: ExplorerMeta }> {
   // IMPORTANT: We fetch from startblock=0 (no API-side filter) and apply
   // the deployment-block filter in code further down. Reasons:
   //   1. Arbiscan's `startblock` semantics turned out to be inconsistent
@@ -62,7 +75,11 @@ async function fetchTxList(
 
   const v2Key = process.env.ETHERSCAN_API_KEY?.trim();
   let txs: ExplorerTx[] | null = null;
+  let source: "v2" | "v1" | "none" = "none";
+  let rejection: string | undefined;
+
   if (v2Key) {
+    source = "v2";
     const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
     try {
       const res = await fetch(url, { cache: "no-store" });
@@ -75,18 +92,18 @@ async function fetchTxList(
         if (data.status === "1" && Array.isArray(data.result)) txs = data.result;
         else if (data.status === "0" && Array.isArray(data.result)) txs = [];
         else {
-          // status=0 with string result ("Invalid API Key", "Max rate limit reached", etc.)
-          console.warn(
-            `explorerApi V2 rejected for chain ${chainId}: ${data.message ?? "unknown"}; result=${
-              typeof data.result === "string" ? data.result : JSON.stringify(data.result).slice(0, 80)
-            }`
-          );
+          rejection = `V2 status=${data.status} message=${data.message ?? "unknown"} result=${
+            typeof data.result === "string" ? data.result : "[]"
+          }`;
+          console.warn(`explorerApi chain ${chainId}: ${rejection}`);
         }
       } else {
-        console.warn(`explorerApi V2 HTTP ${res.status} for chain ${chainId}`);
+        rejection = `V2 HTTP ${res.status}`;
+        console.warn(`explorerApi chain ${chainId}: ${rejection}`);
       }
     } catch (err) {
-      console.warn(`explorerApi V2 fetch failed for chain ${chainId}:`, (err as Error).message);
+      rejection = `V2 fetch threw: ${(err as Error).message}`;
+      console.warn(`explorerApi chain ${chainId}: ${rejection}`);
     }
   }
 
@@ -94,49 +111,74 @@ async function fetchTxList(
   if (txs === null) {
     const v1cfg = V1_FALLBACK[chainId];
     const v1Key = process.env[v1cfg.perChainEnv]?.trim();
-    if (!v1Key) return null;
-    const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
-    try {
-      const res = await fetch(url, { cache: "no-store" });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          status: string;
-          message: string;
-          result: ExplorerTx[] | string;
-        };
-        if (data.status === "0" && Array.isArray(data.result)) txs = [];
-        else if (data.status === "1" && Array.isArray(data.result)) txs = data.result as ExplorerTx[];
+    if (v1Key) {
+      source = "v1";
+      const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
+      try {
+        const res = await fetch(url, { cache: "no-store" });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            status: string;
+            message: string;
+            result: ExplorerTx[] | string;
+          };
+          if (data.status === "0" && Array.isArray(data.result)) txs = [];
+          else if (data.status === "1" && Array.isArray(data.result))
+            txs = data.result as ExplorerTx[];
+          else {
+            rejection = `V1 status=${data.status} message=${data.message}`;
+            console.warn(`explorerApi chain ${chainId}: ${rejection}`);
+          }
+        } else {
+          rejection = `V1 HTTP ${res.status}`;
+        }
+      } catch (err) {
+        rejection = `V1 fetch threw: ${(err as Error).message}`;
+        console.warn(`explorerApi chain ${chainId}: ${rejection}`);
       }
-    } catch (err) {
-      console.warn(`explorerApi V1 fetch failed for chain ${chainId}:`, (err as Error).message);
     }
   }
 
-  if (txs === null) return null;
+  if (txs === null) {
+    return {
+      txs: null,
+      meta: { totalTxs: 0, postDeployTxs: 0, deploymentBlock: null, source, rejection },
+    };
+  }
 
   // Client-side deployment-block filter. If the lookup returned something
-  // suspicious (after the latest observed tx) we log a warning and don't
+  // suspicious (after the wallet's newest tx) we log a warning and don't
   // filter — better to show too much than show nothing.
   const deployFrom = await deploymentBlock(chainId);
-  if (deployFrom === null) {
-    console.warn(`explorerApi chain ${chainId}: deployment block unknown, returning ${txs.length} unfiltered txs`);
-    return txs;
-  }
   const maxObservedBlock = txs.reduce((max, tx) => {
     const bn = BigInt(tx.blockNumber || "0");
     return bn > max ? bn : max;
   }, 0n);
-  if (maxObservedBlock > 0n && deployFrom > maxObservedBlock) {
+
+  let filtered = txs;
+  if (deployFrom === null) {
+    console.warn(`explorerApi chain ${chainId}: deployment block unknown, using all ${txs.length} txs`);
+  } else if (maxObservedBlock > 0n && deployFrom > maxObservedBlock) {
     console.warn(
-      `explorerApi chain ${chainId}: deployment block ${deployFrom} > newest tx block ${maxObservedBlock}; filter would zero everything, skipping it`
+      `explorerApi chain ${chainId}: deploymentBlock ${deployFrom} > newest tx block ${maxObservedBlock}; filter would zero everything, skipping`
     );
-    return txs;
+  } else {
+    filtered = txs.filter((tx) => BigInt(tx.blockNumber || "0") >= deployFrom);
   }
-  const filtered = txs.filter((tx) => BigInt(tx.blockNumber || "0") >= deployFrom);
   console.info(
-    `explorerApi chain ${chainId}: ${txs.length} total txs, ${filtered.length} post-V6.5 (block >= ${deployFrom})`
+    `explorerApi chain ${chainId} (${source}): ${txs.length} total · ${filtered.length} post-V6.5 (deployBlock=${deployFrom ?? "unknown"})`
   );
-  return filtered;
+
+  return {
+    txs: filtered,
+    meta: {
+      totalTxs: txs.length,
+      postDeployTxs: filtered.length,
+      deploymentBlock: deployFrom,
+      source,
+      rejection,
+    },
+  };
 }
 
 export type DestinationFlow = {
@@ -162,6 +204,8 @@ export type RelayerCashFlow = {
   inflowTxCount: number;
   /** Per-destination breakdown — unique addresses on the other side. */
   destinations: DestinationFlow[];
+  /** Pipeline diagnostic — see ExplorerMeta. */
+  meta: ExplorerMeta;
 
   // ── Categorized outflows (subsets of outflow) ───────────────────
   /**
@@ -198,7 +242,7 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
       reserveDestinations.add(paymaster);
     }
 
-    const txs = await fetchTxList(chainId, relayer);
+    const { txs, meta } = await fetchTxList(chainId, relayer);
     if (txs === null) {
       return {
         chainId,
@@ -209,6 +253,7 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         outflowTxCount: 0,
         inflowTxCount: 0,
         destinations: [],
+        meta,
         paymasterTopUp: 0n,
         paymasterTopUpTxCount: 0,
         stealthOutflow: 0n,
@@ -296,6 +341,7 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
       outflowTxCount: outCount,
       inflowTxCount: inCount,
       destinations,
+      meta,
       paymasterTopUp,
       paymasterTopUpTxCount,
       stealthOutflow,

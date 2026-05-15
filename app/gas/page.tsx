@@ -369,7 +369,55 @@ export default async function GasPage({ searchParams }: { searchParams: { period
       </div>
 
       <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
-        <h3 className="font-medium mb-1">Per-chain relayer direct outflows</h3>
+        <h3 className="font-medium mb-1">Explorer API diagnostic — per chain</h3>
+        <p className="text-xs text-text-muted mb-4">
+          How many txs the explorer returned, how many were post-V6.5, where
+          they came from. Lets you spot which chain is silently returning
+          nothing before the dashboard math sees it.
+        </p>
+        <table className="w-full text-sm mb-4">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wider text-text-muted border-b border-border">
+              <th className="pb-2 font-normal">Chain</th>
+              <th className="pb-2 font-normal text-right">Source</th>
+              <th className="pb-2 font-normal text-right">Total txs</th>
+              <th className="pb-2 font-normal text-right">Post-V6.5</th>
+              <th className="pb-2 font-normal text-right">Deploy block</th>
+              <th className="pb-2 font-normal">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {relayerFlows.map((f) => (
+              <tr key={f.chainId} className="border-b border-border last:border-0">
+                <td className="py-2.5">
+                  <ChainBadge chainId={f.chainId} />
+                </td>
+                <td className="py-2.5 text-right text-xs">
+                  <span
+                    className={
+                      f.meta.source === "v2"
+                        ? "text-accent-green"
+                        : f.meta.source === "v1"
+                        ? "text-accent-amber"
+                        : "text-accent-red"
+                    }
+                  >
+                    {f.meta.source}
+                  </span>
+                </td>
+                <td className="py-2.5 text-right tabular-nums">{f.meta.totalTxs}</td>
+                <td className="py-2.5 text-right tabular-nums font-medium">{f.meta.postDeployTxs}</td>
+                <td className="py-2.5 text-right tabular-nums font-mono text-xs text-text-muted">
+                  {f.meta.deploymentBlock !== null ? f.meta.deploymentBlock.toString() : "—"}
+                </td>
+                <td className="py-2.5 text-xs text-text-muted">
+                  {f.meta.rejection ?? (f.available ? "ok" : "no key / unavailable")}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <h4 className="text-sm font-medium mb-1">Per-chain relayer direct outflows</h4>
         <p className="text-xs text-text-muted mb-4">
           Source-of-truth tx history from each block explorer. Net = outflow − dust returns.
         </p>

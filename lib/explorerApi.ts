@@ -20,6 +20,23 @@ import { deploymentBlock } from "./deployment";
 
 const V2_BASE = "https://api.etherscan.io/v2/api";
 
+/**
+ * Etherscan V2 free tier caps at 3 requests/sec. With all 3 chains firing
+ * fetchTxList in parallel on a cold start, we trivially blow that. This
+ * lightweight in-process rate limiter enforces a minimum gap between V2
+ * calls so we hit ~2.5 req/sec safely under the limit.
+ */
+let lastV2CallTs = 0;
+const V2_MIN_GAP_MS = 400;
+async function waitForV2Slot(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastV2CallTs;
+  if (elapsed < V2_MIN_GAP_MS) {
+    await new Promise((r) => setTimeout(r, V2_MIN_GAP_MS - elapsed));
+  }
+  lastV2CallTs = Date.now();
+}
+
 const V1_FALLBACK: Record<SupportedChainId, { base: string; perChainEnv: string }> = {
   [CHAIN_IDS.BASE_SEPOLIA]: {
     base: "https://api-sepolia.basescan.org/api",
@@ -80,6 +97,7 @@ async function fetchTxList(
 
   if (v2Key) {
     source = "v2";
+    await waitForV2Slot();
     const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
     try {
       const res = await fetch(url, { cache: "no-store" });

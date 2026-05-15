@@ -51,15 +51,19 @@ async function fetchTxList(
   chainId: SupportedChainId,
   address: string
 ): Promise<ExplorerTx[] | null> {
-  // Pin startblock to the V6.5 deployment block so pre-deploy relayer activity
-  // (the wallet was used for prior testing) doesn't inflate the cost numbers.
-  // Falls through to 0 if deployment-block lookup is unavailable.
-  const deployFrom = await deploymentBlock(chainId);
-  const startBlock = deployFrom !== null ? deployFrom.toString() : "0";
+  // IMPORTANT: We fetch from startblock=0 (no API-side filter) and apply
+  // the deployment-block filter in code further down. Reasons:
+  //   1. Arbiscan's `startblock` semantics turned out to be inconsistent
+  //      with Etherscan's V2 unified gateway — the same key + chainid
+  //      returned empty for arb-sepolia while working for eth + base.
+  //   2. Client-side filtering means we always have ground-truth tx
+  //      counts to log + fall back on if the deployment-block lookup
+  //      itself returned a bogus value.
 
   const v2Key = process.env.ETHERSCAN_API_KEY?.trim();
+  let txs: ExplorerTx[] | null = null;
   if (v2Key) {
-    const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=${startBlock}&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
+    const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (res.ok) {
@@ -68,41 +72,71 @@ async function fetchTxList(
           message: string;
           result: ExplorerTx[] | string;
         };
-        if (data.status === "1" && Array.isArray(data.result)) return data.result;
-        if (data.status === "0" && Array.isArray(data.result)) return [];
-        // status=0 with string result ("Invalid API Key", "Max rate limit reached", etc.)
-        console.warn(
-          `explorerApi V2 rejected for chain ${chainId}: ${data.message ?? "unknown"}; result=${
-            typeof data.result === "string" ? data.result : JSON.stringify(data.result).slice(0, 80)
-          }`
-        );
+        if (data.status === "1" && Array.isArray(data.result)) txs = data.result;
+        else if (data.status === "0" && Array.isArray(data.result)) txs = [];
+        else {
+          // status=0 with string result ("Invalid API Key", "Max rate limit reached", etc.)
+          console.warn(
+            `explorerApi V2 rejected for chain ${chainId}: ${data.message ?? "unknown"}; result=${
+              typeof data.result === "string" ? data.result : JSON.stringify(data.result).slice(0, 80)
+            }`
+          );
+        }
       } else {
         console.warn(`explorerApi V2 HTTP ${res.status} for chain ${chainId}`);
       }
     } catch (err) {
       console.warn(`explorerApi V2 fetch failed for chain ${chainId}:`, (err as Error).message);
     }
-    // V2 attempted but failed — only fall through to v1 if a per-chain key
-    // is explicitly set (otherwise we'd just bombard another endpoint with
-    // the same likely-bad key).
   }
 
-  const v1cfg = V1_FALLBACK[chainId];
-  const v1Key = process.env[v1cfg.perChainEnv]?.trim();
-  if (!v1Key) return null;
-
-  const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=${startBlock}&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { status: string; message: string; result: ExplorerTx[] | string };
-    if (data.status === "0" && Array.isArray(data.result)) return [];
-    if (data.status !== "1") return null;
-    return data.result as ExplorerTx[];
-  } catch (err) {
-    console.warn(`explorerApi V1 fetch failed for chain ${chainId}:`, (err as Error).message);
-    return null;
+  // V1 per-chain fallback if V2 didn't yield results AND a per-chain key exists.
+  if (txs === null) {
+    const v1cfg = V1_FALLBACK[chainId];
+    const v1Key = process.env[v1cfg.perChainEnv]?.trim();
+    if (!v1Key) return null;
+    const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          status: string;
+          message: string;
+          result: ExplorerTx[] | string;
+        };
+        if (data.status === "0" && Array.isArray(data.result)) txs = [];
+        else if (data.status === "1" && Array.isArray(data.result)) txs = data.result as ExplorerTx[];
+      }
+    } catch (err) {
+      console.warn(`explorerApi V1 fetch failed for chain ${chainId}:`, (err as Error).message);
+    }
   }
+
+  if (txs === null) return null;
+
+  // Client-side deployment-block filter. If the lookup returned something
+  // suspicious (after the latest observed tx) we log a warning and don't
+  // filter — better to show too much than show nothing.
+  const deployFrom = await deploymentBlock(chainId);
+  if (deployFrom === null) {
+    console.warn(`explorerApi chain ${chainId}: deployment block unknown, returning ${txs.length} unfiltered txs`);
+    return txs;
+  }
+  const maxObservedBlock = txs.reduce((max, tx) => {
+    const bn = BigInt(tx.blockNumber || "0");
+    return bn > max ? bn : max;
+  }, 0n);
+  if (maxObservedBlock > 0n && deployFrom > maxObservedBlock) {
+    console.warn(
+      `explorerApi chain ${chainId}: deployment block ${deployFrom} > newest tx block ${maxObservedBlock}; filter would zero everything, skipping it`
+    );
+    return txs;
+  }
+  const filtered = txs.filter((tx) => BigInt(tx.blockNumber || "0") >= deployFrom);
+  console.info(
+    `explorerApi chain ${chainId}: ${txs.length} total txs, ${filtered.length} post-V6.5 (block >= ${deployFrom})`
+  );
+  return filtered;
 }
 
 export type DestinationFlow = {

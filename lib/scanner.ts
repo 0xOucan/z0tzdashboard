@@ -20,7 +20,22 @@ import { cached } from "./cache";
 import { deploymentBlock } from "./deployment";
 import type { SupportedChainId } from "./rpc";
 
+/**
+ * Per-chain getLogs chunk size. Public RPCs cap eth_getLogs response size
+ * and arbitrum-sepolia in particular sees frequent transient HTTP failures
+ * on the standard 9000-block window because of high tx density; halving
+ * the window for arb reduces the chunk size each request needs to return
+ * and improves scan reliability.
+ *
+ * Falls back to the default 9000 for any chain not explicitly listed.
+ */
+const CHUNK_SIZE_BY_CHAIN: Record<number, bigint> = {
+  421614: 4_500n, // arb-sepolia: smaller window, fewer HTTP failures
+};
 export const CHUNK_SIZE = 9_000n;
+function chunkSizeFor(chainId: number): bigint {
+  return CHUNK_SIZE_BY_CHAIN[chainId] ?? CHUNK_SIZE;
+}
 
 /**
  * Cached current-block-number. ~10s TTL — multiple event readers in the same
@@ -71,10 +86,12 @@ export async function scanLogsReverse<T>(
   fetch: (start: bigint, end: bigint) => Promise<T[]>,
   maxEvents: number = MAX_EVENTS_PER_SOURCE
 ): Promise<T[]> {
+  const chainId = client.chain?.id ?? 0;
+  const chunkSize = chunkSizeFor(chainId);
   const results: T[] = [];
   let cursor = to;
   while (cursor >= from && results.length < maxEvents) {
-    const chunkStart = cursor > from + CHUNK_SIZE ? cursor - CHUNK_SIZE : from;
+    const chunkStart = cursor > from + chunkSize ? cursor - chunkSize : from;
     try {
       const chunk = await fetch(chunkStart, cursor);
       results.push(...chunk);

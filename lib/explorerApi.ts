@@ -16,6 +16,7 @@
 import { SUPPORTED_CHAINS, type SupportedChainId, CHAIN_IDS } from "./rpc";
 import { ADDRESSES } from "./addresses";
 import { cached } from "./cache";
+import { deploymentBlock } from "./deployment";
 
 const V2_BASE = "https://api.etherscan.io/v2/api";
 
@@ -50,9 +51,15 @@ async function fetchTxList(
   chainId: SupportedChainId,
   address: string
 ): Promise<ExplorerTx[] | null> {
+  // Pin startblock to the V6.5 deployment block so pre-deploy relayer activity
+  // (the wallet was used for prior testing) doesn't inflate the cost numbers.
+  // Falls through to 0 if deployment-block lookup is unavailable.
+  const deployFrom = await deploymentBlock(chainId);
+  const startBlock = deployFrom !== null ? deployFrom.toString() : "0";
+
   const v2Key = process.env.ETHERSCAN_API_KEY?.trim();
   if (v2Key) {
-    const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
+    const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${address}&startblock=${startBlock}&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v2Key}`;
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (res.ok) {
@@ -84,7 +91,7 @@ async function fetchTxList(
   const v1Key = process.env[v1cfg.perChainEnv]?.trim();
   if (!v1Key) return null;
 
-  const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
+  const url = `${v1cfg.base}?module=account&action=txlist&address=${address}&startblock=${startBlock}&endblock=99999999&page=1&offset=10000&sort=desc&apikey=${v1Key}`;
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) return null;

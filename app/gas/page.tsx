@@ -81,6 +81,7 @@ export default async function GasPage({ searchParams }: { searchParams: { period
     cashin: { count: 0, netWei: 0n },
     bridge: { count: 0, netWei: 0n },
     defi: { count: 0, netWei: 0n },
+    excluded: { count: 0, netWei: 0n },
     unknown: { count: 0, netWei: 0n },
   };
   for (const a of audits) {
@@ -819,8 +820,8 @@ export default async function GasPage({ searchParams }: { searchParams: { period
             we can observe. Worth investigating individually.
           </p>
 
-          <div className="grid grid-cols-4 gap-4 mb-4">
-            {(["cashin", "bridge", "defi", "unknown"] as DestinationCategory[]).map(
+          <div className="grid grid-cols-5 gap-4 mb-4">
+            {(["cashin", "bridge", "defi", "excluded", "unknown"] as DestinationCategory[]).map(
               (cat) => {
                 const t = categoryTotals[cat];
                 const usd = (Number(t.netWei) / 1e18) * ethUsd;
@@ -832,12 +833,14 @@ export default async function GasPage({ searchParams }: { searchParams: { period
                   cashin: "Cash-in stealths",
                   bridge: "CCTP bridge",
                   defi: "DeFi stealths",
+                  excluded: "Excluded (R&D)",
                   unknown: "Unknown",
                 };
                 const tones: Record<DestinationCategory, string> = {
                   cashin: "text-accent-green",
                   bridge: "text-accent-blue",
                   defi: "text-accent",
+                  excluded: "text-text-muted",
                   unknown: "text-accent-red",
                 };
                 return (

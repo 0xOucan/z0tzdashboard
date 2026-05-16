@@ -17,8 +17,14 @@ import type { SupportedChainId } from "./rpc";
 import { getRelayerCashFlow, type DestinationFlow } from "./explorerApi";
 import { getSweepEvents, getCctpBurns } from "./events";
 import { getTezcatliParticipantAddresses } from "./tezcatli";
+import { EXCLUDED_DESTINATIONS } from "./excluded-destinations";
 
-export type DestinationCategory = "cashin" | "bridge" | "defi" | "unknown";
+export type DestinationCategory =
+  | "cashin"
+  | "bridge"
+  | "defi"
+  | "excluded"
+  | "unknown";
 
 export type ClassifiedDestination = DestinationFlow & {
   chainId: SupportedChainId;
@@ -48,11 +54,19 @@ export async function auditRelayerForChain(chainId: SupportedChainId): Promise<R
       chainId,
       available: false,
       totalDestinations: 0,
-      categories: { cashin: 0, bridge: 0, defi: 0, unknown: 0 },
-      netByCategory: { cashin: 0n, bridge: 0n, defi: 0n, unknown: 0n },
+      categories: { cashin: 0, bridge: 0, defi: 0, excluded: 0, unknown: 0 },
+      netByCategory: {
+        cashin: 0n,
+        bridge: 0n,
+        defi: 0n,
+        excluded: 0n,
+        unknown: 0n,
+      },
       destinations: [],
     };
   }
+
+  const excludedAddrs = EXCLUDED_DESTINATIONS[chainId] ?? new Set<string>();
 
   // Build lowercase address sets from each Z0tz event source.
   const cashinAddrs = new Set(
@@ -69,7 +83,11 @@ export async function auditRelayerForChain(chainId: SupportedChainId): Promise<R
   const classified: ClassifiedDestination[] = flow.destinations.map((d) => {
     const lc = d.address.toLowerCase();
     let category: DestinationCategory = "unknown";
-    if (cashinAddrs.has(lc)) category = "cashin";
+    // Order matters: excluded wins over everything because the user has
+    // explicitly tagged the address as non-cost. cashin > bridge > defi is
+    // mostly cosmetic — an address shouldn't appear in more than one.
+    if (excludedAddrs.has(lc)) category = "excluded";
+    else if (cashinAddrs.has(lc)) category = "cashin";
     else if (bridgeAddrs.has(lc)) category = "bridge";
     else if (defiAddrs.has(lc)) category = "defi";
     return { ...d, chainId, category };
@@ -79,12 +97,14 @@ export async function auditRelayerForChain(chainId: SupportedChainId): Promise<R
     cashin: 0,
     bridge: 0,
     defi: 0,
+    excluded: 0,
     unknown: 0,
   };
   const netByCategory: Record<DestinationCategory, bigint> = {
     cashin: 0n,
     bridge: 0n,
     defi: 0n,
+    excluded: 0n,
     unknown: 0n,
   };
   for (const d of classified) {

@@ -21,6 +21,7 @@ import { deploymentBlock } from "./deployment";
 import { waitForEtherscanSlot } from "./etherscanRateLimit";
 import * as turso from "./turso";
 import { latestBlock } from "./scanner";
+import { EXCLUDED_DESTINATIONS } from "./excluded-destinations";
 
 /**
  * Disk-cache the raw explorer API response for 1 hour per (chain, address).
@@ -471,6 +472,14 @@ export type RelayerCashFlow = {
   dustReturns: bigint;
   /** stealthOutflow − dustReturns. The actual cost the relayer absorbed for stealth gas. */
   stealthNetCost: bigint;
+  /**
+   * Relayer → addresses listed in lib/excluded-destinations.ts. Funding for
+   * non-Z0tz reasons (WalletConnect dApp tests, manual gas-refund tests, etc.)
+   * that we don't want counted as a realized cost. Same shape as the
+   * paymasterTopUp bucket: tracked for transparency, excluded from cost math.
+   */
+  excludedOutflow: bigint;
+  excludedOutflowTxCount: number;
 };
 
 export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<RelayerCashFlow> {
@@ -487,6 +496,7 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
     }
 
     const { txs, meta } = await fetchTxList(chainId, relayer);
+    const excludedSet = EXCLUDED_DESTINATIONS[chainId] ?? new Set<string>();
     if (txs === null) {
       return {
         chainId,
@@ -503,6 +513,8 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         stealthOutflow: 0n,
         dustReturns: 0n,
         stealthNetCost: 0n,
+        excludedOutflow: 0n,
+        excludedOutflowTxCount: 0,
       };
     }
 
@@ -513,6 +525,8 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
     let paymasterTopUp = 0n;
     let paymasterTopUpTxCount = 0;
     let stealthOutflow = 0n;
+    let excludedOutflow = 0n;
+    let excludedOutflowTxCount = 0;
     const byAddr = new Map<string, DestinationFlow>();
 
     for (const tx of txs) {
@@ -526,6 +540,10 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
         if (reserveDestinations.has(toLc)) {
           paymasterTopUp += value;
           paymasterTopUpTxCount += 1;
+        } else if (excludedSet.has(toLc)) {
+          // R&D / WC-burner / manual-test destination — not a realized cost.
+          excludedOutflow += value;
+          excludedOutflowTxCount += 1;
         } else {
           stealthOutflow += value;
         }
@@ -566,8 +584,12 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
     // ETH to (i.e. a stealth we funded, returning leftover gas).
     // Replenishments from the treasury are external (`from` address has
     // no prior outflow from the relayer to it) and counted separately.
+    // Excluded destinations are skipped here too — if a WC burner returns
+    // gas, that "saving" shouldn't pad the realized-cost math since the
+    // outflow it offsets wasn't counted as cost.
     let dustReturns = 0n;
     for (const d of destinations) {
+      if (excludedSet.has(d.address.toLowerCase())) continue;
       if (d.outflow > 0n && d.inflow > 0n) {
         // The address received an outflow AND sent something back. Cap
         // the dust-return component at the outflow so we never claim
@@ -591,6 +613,8 @@ export async function getRelayerCashFlow(chainId: SupportedChainId): Promise<Rel
       stealthOutflow,
       dustReturns,
       stealthNetCost: stealthOutflow > dustReturns ? stealthOutflow - dustReturns : 0n,
+      excludedOutflow,
+      excludedOutflowTxCount,
     };
   });
 }

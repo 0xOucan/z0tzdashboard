@@ -19,6 +19,8 @@ import { cached } from "./cache";
 import { readCheckpoint, writeCheckpoint } from "./persistent-cache";
 import { deploymentBlock } from "./deployment";
 import { waitForEtherscanSlot } from "./etherscanRateLimit";
+import * as turso from "./turso";
+import { latestBlock } from "./scanner";
 
 /**
  * Disk-cache the raw explorer API response for 1 hour per (chain, address).
@@ -119,7 +121,171 @@ export type ExplorerMeta = {
   rejection?: string;
 };
 
+/**
+ * How often to re-poll Etherscan for new txs per (chain, address). Within
+ * this window we serve straight from the Turso `txs` table without touching
+ * Etherscan at all. 5 min is enough to look "live" while keeping API usage
+ * tiny — each refresh asks for blocks AFTER our cursor, usually returning
+ * 0-50 rows vs the full 1153 we'd otherwise refetch.
+ */
+const TURSO_SYNC_TTL_MS = 5 * 60 * 1000;
+
 async function fetchTxList(
+  chainId: SupportedChainId,
+  address: string
+): Promise<{ txs: ExplorerTx[] | null; meta: ExplorerMeta }> {
+  // Turso-backed incremental sync — preferred path. If Turso isn't
+  // configured, fall through to the legacy /tmp blob cache below.
+  if (turso.isEnabled()) {
+    try {
+      return await fetchTxListIncremental(chainId, address);
+    } catch (err) {
+      console.warn(
+        `explorerApi chain ${chainId}: Turso sync failed (${(err as Error).message}), falling back to blob cache`
+      );
+    }
+  }
+  return fetchTxListLegacy(chainId, address);
+}
+
+/**
+ * Turso path: query DB, sync only the delta from Etherscan since the last
+ * scan cursor, return the union. After the initial backfill this hits
+ * Etherscan once per 5min per (chain, address) for a near-empty response
+ * — the rate limit becomes a non-issue.
+ */
+async function fetchTxListIncremental(
+  chainId: SupportedChainId,
+  address: string
+): Promise<{ txs: ExplorerTx[] | null; meta: ExplorerMeta }> {
+  const addr = address.toLowerCase();
+  const v2Key = process.env.ETHERSCAN_API_KEY?.trim();
+
+  const [state, deployFrom] = await Promise.all([
+    turso.getScanState(chainId, addr),
+    deploymentBlock(chainId),
+  ]);
+
+  const now = Date.now();
+  const isStale = !state || now - state.lastFetchedAt > TURSO_SYNC_TTL_MS;
+  // Floor scans at the deployment block so we don't backfill irrelevant
+  // pre-V6.5 history. If deployment lookup fails, start from 0.
+  const deployFloor = deployFrom !== null ? Number(deployFrom) : 0;
+  const cursor = Math.max(state?.lastBlockScanned ?? 0, deployFloor);
+
+  let rejection: string | undefined;
+  let source: "v2" | "v1" | "none" = state ? "v2" : "none";
+
+  if (isStale && v2Key) {
+    source = "v2";
+    const url = `${V2_BASE}?chainid=${chainId}&module=account&action=txlist&address=${addr}&startblock=${cursor + 1}&endblock=99999999&page=1&offset=10000&sort=asc&apikey=${v2Key}`;
+    const data = await fetchEtherscanV2(url);
+
+    let newTxs: ExplorerTx[] = [];
+    if (data === null) {
+      rejection = "V2 hard failure (HTTP error or fetch threw after retries)";
+      console.warn(`explorerApi chain ${chainId}: ${rejection}`);
+    } else if (data.status === "1" && Array.isArray(data.result)) {
+      newTxs = data.result as ExplorerTx[];
+    } else if (data.status === "0" && Array.isArray(data.result)) {
+      // "No transactions found" — empty result, but a clean response.
+      newTxs = [];
+    } else {
+      rejection = `V2 status=${data.status} message=${data.message ?? "unknown"} result=${
+        typeof data.result === "string" ? data.result : "[]"
+      }`;
+      console.warn(`explorerApi chain ${chainId}: ${rejection}`);
+    }
+
+    if (rejection === undefined) {
+      // Persist new txs and advance the cursor to the current chain head.
+      // Using the chain head (not max(newTx.block)) so the next sync's
+      // startblock skips the empty range past our last activity.
+      if (newTxs.length > 0) {
+        await turso.insertTxs(
+          chainId,
+          newTxs.map((tx) => ({
+            hash: tx.hash,
+            blockNumber: Number(tx.blockNumber),
+            blockTimestamp: Number(tx.timeStamp),
+            fromAddr: tx.from,
+            toAddr: tx.to || null,
+            valueWei: tx.value,
+            gasUsed: Number(tx.gasUsed) || 0,
+            gasPrice: tx.gasPrice,
+            isError: tx.isError === "1",
+          }))
+        );
+      }
+      let head: number;
+      try {
+        head = Number(await latestBlock(chainId));
+      } catch {
+        // RPC unavailable — fall back to max block we observed.
+        head = newTxs.reduce(
+          (m, t) => Math.max(m, Number(t.blockNumber) || 0),
+          cursor
+        );
+      }
+      await turso.setScanState(
+        chainId,
+        addr,
+        Math.max(cursor, head),
+        now
+      );
+      console.info(
+        `explorerApi chain ${chainId} (turso): synced +${newTxs.length} txs since block ${cursor}, head ${head}`
+      );
+    }
+  }
+
+  // Read the full view for this address from the DB.
+  const dbTxs = await turso.queryTxs(chainId, addr, deployFloor);
+
+  // Translate DbTx → ExplorerTx for the downstream consumers (they expect
+  // string-encoded numeric fields from the Etherscan response shape).
+  const txs: ExplorerTx[] = dbTxs.map((t) => ({
+    hash: t.hash,
+    blockNumber: t.blockNumber.toString(),
+    timeStamp: t.blockTimestamp.toString(),
+    from: t.fromAddr,
+    to: t.toAddr ?? "",
+    value: t.valueWei,
+    gasUsed: t.gasUsed.toString(),
+    gasPrice: t.gasPrice,
+    isError: t.isError ? "1" : "0",
+  }));
+
+  // Couldn't sync AND we have no DB rows? Surface that as a hard failure
+  // so the UI shows "—" instead of misleading zeros.
+  if (rejection && txs.length === 0 && !state) {
+    return {
+      txs: null,
+      meta: { totalTxs: 0, postDeployTxs: 0, deploymentBlock: deployFrom, source, rejection },
+    };
+  }
+
+  console.info(
+    `explorerApi chain ${chainId} (turso): ${txs.length} txs from DB (deployBlock=${deployFrom ?? "unknown"}, cursor=${cursor})`
+  );
+
+  return {
+    txs,
+    meta: {
+      totalTxs: txs.length,
+      postDeployTxs: txs.length,
+      deploymentBlock: deployFrom,
+      source: txs.length > 0 ? source : (rejection ? source : "v2"),
+      rejection,
+    },
+  };
+}
+
+/**
+ * Legacy path: blob-cache the whole txlist on disk, refetch on stale.
+ * Used when Turso isn't configured (local dev or pre-migration deploys).
+ */
+async function fetchTxListLegacy(
   chainId: SupportedChainId,
   address: string
 ): Promise<{ txs: ExplorerTx[] | null; meta: ExplorerMeta }> {
@@ -132,10 +298,6 @@ async function fetchTxList(
   //      counts to log + fall back on if the deployment-block lookup
   //      itself returned a bogus value.
 
-  // ── Disk-cache fast path ───────────────────────────────────────────
-  // If we have a recent successful tx-list on disk, skip the API entirely.
-  // This is what protects us from Etherscan's 3-req/sec free-tier cap
-  // when multiple Vercel function instances cold-start near-simultaneously.
   const diskKey = `explorer-tx/${chainId}/${address.toLowerCase()}`;
   const disk = await readCheckpoint<DiskCachedFetch>(diskKey);
   if (disk && Date.now() - disk.fetchedAt < DISK_CACHE_TTL_MS) {
@@ -166,7 +328,6 @@ async function fetchTxList(
     }
   }
 
-  // V1 per-chain fallback if V2 didn't yield results AND a per-chain key exists.
   if (txs === null) {
     const v1cfg = V1_FALLBACK[chainId];
     const v1Key = process.env[v1cfg.perChainEnv]?.trim();
@@ -205,8 +366,6 @@ async function fetchTxList(
     };
   }
 
-  // Successful fetch — persist before filtering so the next cold instance
-  // can apply the (possibly updated) deployment-block filter on its own.
   void writeCheckpoint<DiskCachedFetch>(diskKey, {
     fetchedAt: Date.now(),
     source: source === "none" ? "v2" : source,

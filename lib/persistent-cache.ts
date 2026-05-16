@@ -1,20 +1,23 @@
 /**
- * File-based KV cache. Survives dev server restarts, page refreshes, and
- * function reinvocations. Backs the incremental event scanner so a refresh
- * only fetches the delta since the last scan, not the full deploy → latest
- * range.
+ * Generic K/V checkpoint cache.
  *
- * Vercel note: serverless functions can't write to project cwd. Set
- * `Z0TZ_CACHE_DIR=/tmp/z0tz-cache` to use the warm-instance ephemeral disk,
- * or switch to Vercel KV / Upstash Redis for cold-start persistence.
+ * Backend selection (at runtime, per call):
+ *   1. Turso (libSQL) — used when TURSO_DATABASE_URL + TURSO_AUTH_TOKEN
+ *      are set. Shared across every Vercel function instance, survives
+ *      cold starts. Preferred.
+ *   2. /tmp file cache — fallback for local dev (or when Turso isn't
+ *      configured). On Vercel, /tmp is per-instance ephemeral so cold
+ *      starts always re-fetch; that's why Turso is the upgrade path.
  *
- * Concurrency: ~18 event-source caches write near-simultaneously on a fresh
- * scan. Vercel functions cap open file descriptors low — letting all 18
- * writes race produced EMFILE: too many open files. All writes serialize
- * through a shared promise chain so at most one FS handle is in flight.
+ * Concurrency on the /tmp path: ~18 event-source caches write near-
+ * simultaneously on a fresh scan. Vercel functions cap open file
+ * descriptors low — letting all 18 writes race produced EMFILE. The /tmp
+ * path serializes writes through a shared promise chain. Turso doesn't
+ * have this issue since it's network-bound.
  */
 import { promises as fs } from "fs";
 import path from "path";
+import * as turso from "./turso";
 
 const CACHE_DIR =
   process.env.Z0TZ_CACHE_DIR || path.join(process.cwd(), ".z0tz-cache");
@@ -43,6 +46,16 @@ function bigintReviver(_key: string, value: unknown): unknown {
 }
 
 export async function readCheckpoint<T>(key: string): Promise<T | null> {
+  // Turso path
+  if (turso.isEnabled()) {
+    try {
+      return await turso.getCheckpoint<T>(key);
+    } catch (err) {
+      console.warn(`[persistent-cache] Turso read failed for ${key}: ${(err as Error).message}`);
+      // fall through to /tmp
+    }
+  }
+  // /tmp path
   try {
     const file = path.join(CACHE_DIR, safeKey(key) + ".json");
     const data = await fs.readFile(file, "utf8");
@@ -52,12 +65,17 @@ export async function readCheckpoint<T>(key: string): Promise<T | null> {
   }
 }
 
-// Serialize all writes through a single promise chain. This caps FD usage at
-// 1 at a time (mkdir + writeFile both count) which prevents EMFILE on Vercel
-// when ~18 caches try to flush simultaneously.
+// Serialize /tmp writes through a single promise chain so concurrent writers
+// don't pile up open FDs (EMFILE on Vercel). Turso writes are network-bound,
+// no FD pressure, so we don't gate them.
 let writeChain: Promise<void> = Promise.resolve();
 
 export function writeCheckpoint<T>(key: string, value: T): Promise<void> {
+  if (turso.isEnabled()) {
+    return turso.setCheckpoint(key, value).catch((err: Error) => {
+      console.warn(`[persistent-cache] Turso write failed for ${key}: ${err.message}`);
+    });
+  }
   const next = writeChain.then(async () => {
     const file = path.join(CACHE_DIR, safeKey(key) + ".json");
     try {
@@ -69,7 +87,7 @@ export function writeCheckpoint<T>(key: string, value: T): Promise<void> {
         warnedReadOnly = true;
         const hint =
           e.code === "EACCES" || e.code === "EROFS" || e.code === "ENOENT"
-            ? "filesystem read-only — set Z0TZ_CACHE_DIR=/tmp/z0tz-cache on Vercel"
+            ? "filesystem read-only — set TURSO_DATABASE_URL+TURSO_AUTH_TOKEN, or Z0TZ_CACHE_DIR=/tmp/z0tz-cache on Vercel"
             : e.code === "EMFILE" || e.code === "ENFILE"
             ? "too many open files — writes are serialized, should self-resolve"
             : "unknown — accepting slower cold starts";
@@ -79,12 +97,13 @@ export function writeCheckpoint<T>(key: string, value: T): Promise<void> {
       }
     }
   });
-  // Detach error so the chain isn't poisoned for the next writer.
   writeChain = next.catch(() => {});
   return next;
 }
 
 export async function purgeAllCheckpoints(): Promise<void> {
+  // Note: Turso checkpoints aren't purged here — use the Turso UI or a
+  // manual `DELETE FROM checkpoints` if you need a hard reset.
   try {
     await fs.rm(CACHE_DIR, { recursive: true, force: true });
   } catch {

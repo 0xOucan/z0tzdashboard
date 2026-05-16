@@ -18,6 +18,7 @@ import { ADDRESSES } from "./addresses";
 import { cached } from "./cache";
 import { readCheckpoint, writeCheckpoint } from "./persistent-cache";
 import { deploymentBlock } from "./deployment";
+import { waitForEtherscanSlot } from "./etherscanRateLimit";
 
 /**
  * Disk-cache the raw explorer API response for 1 hour per (chain, address).
@@ -34,28 +35,6 @@ type DiskCachedFetch = {
 };
 
 const V2_BASE = "https://api.etherscan.io/v2/api";
-
-/**
- * Etherscan V2 free tier caps at 3 requests/sec. With all 3 chains firing
- * fetchTxList in parallel on a cold start, we trivially blow that. This
- * lightweight in-process rate limiter enforces a minimum gap between V2
- * calls so we hit ~2.5 req/sec safely under the limit.
- *
- * The in-process limiter doesn't see across function instances — when
- * multiple Vercel functions cold-start near-simultaneously they each fire
- * independently. The retry-with-jitter in `fetchEtherscanV2` handles that
- * cross-instance racing.
- */
-let lastV2CallTs = 0;
-const V2_MIN_GAP_MS = 400;
-async function waitForV2Slot(): Promise<void> {
-  const now = Date.now();
-  const elapsed = now - lastV2CallTs;
-  if (elapsed < V2_MIN_GAP_MS) {
-    await new Promise((r) => setTimeout(r, V2_MIN_GAP_MS - elapsed));
-  }
-  lastV2CallTs = Date.now();
-}
 
 type EtherscanResponse = {
   status: string;
@@ -80,7 +59,7 @@ async function fetchEtherscanV2(
       const jitter = Math.random() * 400;
       await new Promise((r) => setTimeout(r, base + jitter));
     }
-    await waitForV2Slot();
+    await waitForEtherscanSlot();
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) return null;

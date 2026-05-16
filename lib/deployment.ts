@@ -15,6 +15,7 @@ import { CHAIN_IDS, type SupportedChainId } from "./rpc";
 import { publicClient } from "./chains";
 import { cached } from "./cache";
 import { readCheckpoint, writeCheckpoint } from "./persistent-cache";
+import { waitForEtherscanSlot } from "./etherscanRateLimit";
 
 /**
  * Deployment-block disk cache TTL. The block at a fixed timestamp can never
@@ -64,6 +65,9 @@ async function blockAtTimestampViaEtherscan(
       const jitter = Math.random() * 400;
       await new Promise((r) => setTimeout(r, base + jitter));
     }
+    // Share the same rate-limit pacing as lib/explorerApi.ts — both files hit
+    // the same Etherscan V2 endpoint and the limit is per-IP, not per-module.
+    await waitForEtherscanSlot();
     try {
       const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) {

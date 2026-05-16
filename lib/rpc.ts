@@ -30,31 +30,41 @@ export const CHAIN_META: Record<SupportedChainId, { name: string; short: string;
   [CHAIN_IDS.ARB_SEPOLIA]: { name: "Arb Sepolia", short: "arb", color: "#28a0f0" },
 };
 
+// Curated pool ordering: official chain RPCs first (lowest latency,
+// consistent reads), reliable third-parties next, and drpc demoted because
+// its free tier responds with "Request timeout on the free tier, please
+// upgrade your tier to the paid one" once we exhaust the per-IP quota.
+// Latency notes sourced from chainlist.org 2026-05-16 reading.
 const RPC_POOLS: Record<number, string[]> = {
   [CHAIN_IDS.BASE_SEPOLIA]: [
     "https://sepolia.base.org",
-    "https://base-sepolia.drpc.org",
     "https://base-sepolia.gateway.tenderly.co",
+    "https://base-sepolia.api.onfinality.io/public",
     "https://rpc.sentio.xyz/base-sepolia",
     "https://base-sepolia-public.nodies.app",
+    "https://public.stackup.sh/api/v1/node/base-sepolia",
     "https://base-sepolia-rpc.publicnode.com",
+    "https://base-sepolia.drpc.org",
   ],
   [CHAIN_IDS.ETH_SEPOLIA]: [
     "https://rpc.sepolia.ethpandaops.io",
     "https://sepolia.gateway.tenderly.co",
-    "https://sepolia.drpc.org",
-    "https://rpc.sentio.xyz/sepolia",
-    "https://1rpc.io/sepolia",
     "https://eth-sepolia.api.onfinality.io/public",
+    "https://1rpc.io/sepolia",
+    "https://eth-sepolia.public.blastapi.io",
+    "https://rpc.sentio.xyz/sepolia",
     "https://ethereum-sepolia-public.nodies.app",
     "https://ethereum-sepolia-rpc.publicnode.com",
+    "https://sepolia.drpc.org",
   ],
   [CHAIN_IDS.ARB_SEPOLIA]: [
     "https://sepolia-rollup.arbitrum.io/rpc",
-    "https://arbitrum-sepolia.drpc.org",
     "https://arbitrum-sepolia.gateway.tenderly.co",
-    "https://api.zan.top/arb-sepolia",
+    "https://arbitrum-sepolia.api.onfinality.io/public",
+    "https://public.stackup.sh/api/v1/node/arbitrum-sepolia",
+    "https://endpoints.omniatech.io/v1/arbitrum/sepolia/public",
     "https://arbitrum-sepolia-rpc.publicnode.com",
+    "https://arbitrum-sepolia.drpc.org",
   ],
 };
 
@@ -71,5 +81,8 @@ export function makeTransport(chainId: number): Transport {
   if (pool.length === 0) {
     throw new Error(`No RPC pool configured for chain ${chainId}`);
   }
-  return fallback(pool.map((u) => http(u, { timeout: 12_000 })), { retryCount: 2 });
+  // 8s per-RPC timeout: long enough for a slow but-up node to answer, short
+  // enough that the failover to the next URL fires before Vercel's 60s
+  // function ceiling burns through on a multi-source scan page.
+  return fallback(pool.map((u) => http(u, { timeout: 8_000 })), { retryCount: 1 });
 }

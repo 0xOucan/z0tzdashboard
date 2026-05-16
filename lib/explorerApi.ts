@@ -217,24 +217,34 @@ async function fetchTxListIncremental(
           }))
         );
       }
-      let head: number;
+      let head: number | null;
       try {
         head = Number(await latestBlock(chainId));
       } catch {
-        // RPC unavailable — fall back to max block we observed.
-        head = newTxs.reduce(
-          (m, t) => Math.max(m, Number(t.blockNumber) || 0),
-          cursor
-        );
+        head = null;
       }
-      await turso.setScanState(
-        chainId,
-        addr,
-        Math.max(cursor, head),
-        now
-      );
+      // Cursor-advance policy — order matters:
+      //   1. RPC head succeeded  → advance to head (best: skips empty trailing range)
+      //   2. We got new txs      → advance to max(newTx.block) so next sync's
+      //                            startblock skips the rows we just inserted
+      //   3. No head, no txs     → leave state unchanged. Writing cursor=cursor
+      //                            (the previous fallback) would mark "still
+      //                            need to scan" as "fully scanned" — locks the
+      //                            address into a zero-row state until manual
+      //                            intervention. Skipping the write lets the
+      //                            next call retry immediately.
+      let advancedTo: number | null = null;
+      if (head !== null) {
+        advancedTo = Math.max(cursor, head);
+      } else if (newTxs.length > 0) {
+        const maxNew = newTxs.reduce((m, t) => Math.max(m, Number(t.blockNumber) || 0), 0);
+        if (maxNew > cursor) advancedTo = maxNew;
+      }
+      if (advancedTo !== null) {
+        await turso.setScanState(chainId, addr, advancedTo, now);
+      }
       console.info(
-        `explorerApi chain ${chainId} (turso): synced +${newTxs.length} txs since block ${cursor}, head ${head}`
+        `explorerApi chain ${chainId} (turso): synced +${newTxs.length} txs since block ${cursor}, head ${head ?? "rpc-down"}`
       );
     }
   }

@@ -9,7 +9,7 @@ import { SingleLineChart } from "@/components/charts/LineChart";
 import { Donut } from "@/components/charts/Donut";
 import { ChainBadge } from "@/components/ChainBadge";
 import { ExplorerLink } from "@/components/ExplorerLink";
-import { getPaymasterOps, getOperationalBalances } from "@/lib/events";
+import { getPaymasterOps, getOperationalBalances, getSweepEvents } from "@/lib/events";
 import { bucketDailyEth, filterByPeriod, sumGasCost, totalsByChain } from "@/lib/aggregate";
 import { cumulative, bucketByOpClass, opClassColor, classifyByGas } from "@/lib/analytics";
 import { BENCHMARK } from "@/lib/benchmarks";
@@ -35,13 +35,45 @@ const OP_CLASS_LABEL: Record<string, string> = {
 export default async function GasPage({ searchParams }: { searchParams: { period?: string } }) {
   const period = parsePeriod(searchParams.period);
 
-  const [paymasterPerChain, balances, ethUsd, relayerFlows, audits] = await Promise.all([
+  const [paymasterPerChain, balances, ethUsd, relayerFlows, audits, sweepsPerChain] = await Promise.all([
     Promise.all(SUPPORTED_CHAINS.map((c) => getPaymasterOps(c))),
     getOperationalBalances(),
     getEthPriceUsd(),
     getAllRelayerCashFlows(),
     auditAllChains(SUPPORTED_CHAINS),
+    Promise.all(SUPPORTED_CHAINS.map((c) => getSweepEvents(c))),
   ]);
+
+  // Per-chain P&L — all-time aggregates (intentionally not period-filtered,
+  // since the relayer cash-flow numbers from explorerApi are also all-time
+  // and mixing windows would mislead). Lets the operator see which chain is
+  // carrying the cost burden vs pulling its weight in fee revenue.
+  const perChainPnl = SUPPORTED_CHAINS.map((chainId) => {
+    const sweeps = sweepsPerChain[SUPPORTED_CHAINS.indexOf(chainId)] ?? [];
+    const allChainOps = paymasterPerChain[SUPPORTED_CHAINS.indexOf(chainId)] ?? [];
+    const flow = relayerFlows.find((f) => f.chainId === chainId);
+    const revenueUsdc = sweeps.reduce((a, s) => a + s.fee, 0n);
+    const revenueUsd = Number(revenueUsdc) / 1e6;
+    const paymasterWei = allChainOps.reduce((a, o) => a + o.actualGasCost, 0n);
+    const paymasterUsd = (Number(paymasterWei) / 1e18) * ethUsd;
+    const relayerNetUsd = flow?.available
+      ? (Number(flow.stealthNetCost) / 1e18) * ethUsd
+      : 0;
+    const totalCostUsd = paymasterUsd + relayerNetUsd;
+    const netUsd = revenueUsd - totalCostUsd;
+    const coverage = totalCostUsd > 0 ? revenueUsd / totalCostUsd : Number.POSITIVE_INFINITY;
+    return {
+      chainId,
+      revenueUsd,
+      sweepCount: sweeps.length,
+      paymasterUsd,
+      paymasterOps: allChainOps.length,
+      relayerNetUsd,
+      totalCostUsd,
+      netUsd,
+      coverage,
+    };
+  });
 
   // Aggregate audit categories across chains.
   type CatTotals = { count: number; netWei: bigint };
@@ -246,6 +278,108 @@ export default async function GasPage({ searchParams }: { searchParams: { period
             )
           }
         />
+      </div>
+
+      <div className="bg-bg-card border border-border rounded-lg p-5 mb-6">
+        <h3 className="font-medium mb-1">Per-chain P&L</h3>
+        <p className="text-xs text-text-muted mb-4">
+          Sweeper fee revenue vs costs (paymaster gas + relayer ETH outflows to stealths), all-time. The chain with the most negative net is your biggest cost center; the chain with the highest coverage % is closest to breaking even.
+        </p>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wider text-text-muted border-b border-border">
+              <th className="pb-2 font-normal">Chain</th>
+              <th className="pb-2 font-normal text-right">Revenue</th>
+              <th className="pb-2 font-normal text-right">Paymaster gas</th>
+              <th className="pb-2 font-normal text-right">Relayer net</th>
+              <th className="pb-2 font-normal text-right">Total cost</th>
+              <th className="pb-2 font-normal text-right">Net</th>
+              <th className="pb-2 font-normal text-right">Coverage</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perChainPnl.map((r) => {
+              const netColor =
+                r.netUsd >= 0
+                  ? "text-accent-green"
+                  : r.coverage >= 0.5
+                  ? "text-accent-amber"
+                  : "text-accent-red";
+              return (
+                <tr key={r.chainId} className="border-b border-border last:border-0">
+                  <td className="py-3">
+                    <ChainBadge chainId={r.chainId} />
+                  </td>
+                  <td className="py-3 text-right tabular-nums">
+                    {fmtUsd(r.revenueUsd)}
+                    <span className="text-xs text-text-muted ml-1">· {r.sweepCount}</span>
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    −{fmtUsd(r.paymasterUsd)}
+                    <span className="text-xs ml-1">· {r.paymasterOps}</span>
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    −{fmtUsd(r.relayerNetUsd)}
+                  </td>
+                  <td className="py-3 text-right tabular-nums">−{fmtUsd(r.totalCostUsd)}</td>
+                  <td className={"py-3 text-right tabular-nums font-medium " + netColor}>
+                    {r.netUsd >= 0 ? "+" : ""}
+                    {fmtUsd(r.netUsd)}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    {Number.isFinite(r.coverage) ? `${(r.coverage * 100).toFixed(0)}%` : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+            {/* Roll-up row */}
+            {(() => {
+              const tot = perChainPnl.reduce(
+                (a, r) => ({
+                  revenueUsd: a.revenueUsd + r.revenueUsd,
+                  paymasterUsd: a.paymasterUsd + r.paymasterUsd,
+                  relayerNetUsd: a.relayerNetUsd + r.relayerNetUsd,
+                  totalCostUsd: a.totalCostUsd + r.totalCostUsd,
+                  netUsd: a.netUsd + r.netUsd,
+                  sweepCount: a.sweepCount + r.sweepCount,
+                  paymasterOps: a.paymasterOps + r.paymasterOps,
+                }),
+                { revenueUsd: 0, paymasterUsd: 0, relayerNetUsd: 0, totalCostUsd: 0, netUsd: 0, sweepCount: 0, paymasterOps: 0 }
+              );
+              const totCov = tot.totalCostUsd > 0 ? tot.revenueUsd / tot.totalCostUsd : Number.POSITIVE_INFINITY;
+              const netColor =
+                tot.netUsd >= 0
+                  ? "text-accent-green"
+                  : totCov >= 0.5
+                  ? "text-accent-amber"
+                  : "text-accent-red";
+              return (
+                <tr className="font-medium">
+                  <td className="py-3 text-text-muted">Total</td>
+                  <td className="py-3 text-right tabular-nums">
+                    {fmtUsd(tot.revenueUsd)}
+                    <span className="text-xs text-text-muted ml-1">· {tot.sweepCount}</span>
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    −{fmtUsd(tot.paymasterUsd)}
+                    <span className="text-xs ml-1">· {tot.paymasterOps}</span>
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    −{fmtUsd(tot.relayerNetUsd)}
+                  </td>
+                  <td className="py-3 text-right tabular-nums">−{fmtUsd(tot.totalCostUsd)}</td>
+                  <td className={"py-3 text-right tabular-nums " + netColor}>
+                    {tot.netUsd >= 0 ? "+" : ""}
+                    {fmtUsd(tot.netUsd)}
+                  </td>
+                  <td className="py-3 text-right tabular-nums text-text-muted">
+                    {Number.isFinite(totCov) ? `${(totCov * 100).toFixed(0)}%` : "—"}
+                  </td>
+                </tr>
+              );
+            })()}
+          </tbody>
+        </table>
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-6">

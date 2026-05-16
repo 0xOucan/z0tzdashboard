@@ -16,6 +16,7 @@ import type { Address } from "viem";
 import type { SupportedChainId } from "./rpc";
 import { getRelayerCashFlow, type DestinationFlow } from "./explorerApi";
 import { getSweepEvents, getCctpBurns } from "./events";
+import { getTezcatliParticipantAddresses } from "./tezcatli";
 
 export type DestinationCategory = "cashin" | "bridge" | "defi" | "unknown";
 
@@ -35,10 +36,11 @@ export type RelayerAudit = {
 };
 
 export async function auditRelayerForChain(chainId: SupportedChainId): Promise<RelayerAudit> {
-  const [flow, sweeps, cctp] = await Promise.all([
+  const [flow, sweeps, cctp, defiParticipants] = await Promise.all([
     getRelayerCashFlow(chainId),
     getSweepEvents(chainId),
     getCctpBurns(chainId),
+    getTezcatliParticipantAddresses(chainId),
   ]);
 
   if (!flow.available) {
@@ -59,9 +61,10 @@ export async function auditRelayerForChain(chainId: SupportedChainId): Promise<R
   const bridgeAddrs = new Set(
     cctp.map((c) => (c.depositor as string).toLowerCase())
   );
-  // TODO: when tezcatli.ts exposes the underlying event lists, add depositor
-  // and withdrawer address sets here.
-  const defiAddrs = new Set<string>();
+  // DeFi: addresses seen as `sender` on TezcatliVault.DepositRecorded OR
+  // `owner` on WithdrawalExecuted. These are the DeFi stealths the relayer
+  // funded so they could sign a vault deposit/withdraw.
+  const defiAddrs = defiParticipants;
 
   const classified: ClassifiedDestination[] = flow.destinations.map((d) => {
     const lc = d.address.toLowerCase();

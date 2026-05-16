@@ -169,6 +169,54 @@ export async function getTezcatliVaultActivity(): Promise<TezcatliVaultActivity[
   });
 }
 
+/**
+ * Pull just the unique depositor + withdrawer addresses from the Tezcatli
+ * vault on a given chain. Used by lib/audit.ts to classify relayer outflow
+ * destinations as "defi" (= a stealth that subsequently deposited into a
+ * Tezcatli vault). Reuses the same incremental scans as
+ * getTezcatliVaultActivity so the second caller pays no extra RPC cost.
+ */
+export async function getTezcatliParticipantAddresses(
+  chainId: SupportedChainId
+): Promise<Set<string>> {
+  const addr = ADDRESSES[chainId].tezcatliVault;
+  if (!addr) return new Set();
+  const [deposits, withdrawals] = await Promise.all([
+    incrementalScan<unknown, VaultDepositRow>({
+      chainId,
+      contractAddress: addr,
+      eventKey: "tezcatliVaultDeposit",
+      getLogs: (client, from, to) =>
+        client.getLogs({ address: addr, event: TEZCATLI_VAULT_ABI[0], fromBlock: from, toBlock: to }),
+      decode: (log: any, chainId) => ({
+        chainId,
+        blockNumber: log.blockNumber,
+        txHash: log.transactionHash,
+        sender: log.args.sender as Address,
+        beneficiary: log.args.beneficiary as Address,
+      }),
+    }),
+    incrementalScan<unknown, VaultWithdrawRow>({
+      chainId,
+      contractAddress: addr,
+      eventKey: "tezcatliVaultWithdraw",
+      getLogs: (client, from, to) =>
+        client.getLogs({ address: addr, event: TEZCATLI_VAULT_ABI[1], fromBlock: from, toBlock: to }),
+      decode: (log: any, chainId) => ({
+        chainId,
+        blockNumber: log.blockNumber,
+        txHash: log.transactionHash,
+        owner: log.args.owner as Address,
+        recipient: log.args.recipient as Address,
+      }),
+    }),
+  ]);
+  const out = new Set<string>();
+  for (const d of deposits) out.add(d.sender.toLowerCase());
+  for (const w of withdrawals) out.add(w.owner.toLowerCase());
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Aave V3 adapter — live read (no events to cache)
 // ---------------------------------------------------------------------------

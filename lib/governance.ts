@@ -24,7 +24,19 @@ import { cached } from "./cache";
 import { SUPPORTED_CHAINS, type SupportedChainId } from "./rpc";
 import { getScanRange, scanLogsReverse, withBlockTimestamps } from "./scanner";
 
-const CACHE_TTL = 60;
+// 5 min instead of 60s. Governance events (recovery starts, policy
+// changes, admin rotations) are rare — minutes-stale is fine. The 60s
+// TTL was forcing a full re-scan on every page hit and racing the
+// Vercel 60s function ceiling.
+const CACHE_TTL = 300;
+
+/**
+ * Hard wall-clock cap per chain inside scanGovernance. Chains run in
+ * parallel, so 25s × 1 (parallel) = 25s worst-case wall time vs the
+ * Vercel 60s function ceiling. If a chain blows past this we return the
+ * other chains' partial events rather than killing the whole page.
+ */
+const PER_CHAIN_TIMEOUT_MS = 25_000;
 
 export type GovSeverity = "critical" | "warn" | "info";
 
@@ -85,10 +97,24 @@ export async function scanGovernance(): Promise<GovEvent[]> {
   return cached("governanceEvents", CACHE_TTL, async () => {
     const events: GovEvent[] = [];
 
-    // Sequential per chain to keep RPC pressure manageable — each chain
-    // fires off many parallel event scans internally already.
-    for (const chainId of SUPPORTED_CHAINS) {
-      try {
+    // Parallel across chains with a per-chain wall-clock cap. The previous
+    // sequential design meant a slow arb-sepolia scan blocked base + eth
+    // from ever running, and the page would hit the 60s function ceiling
+    // before any chain finished. Now each chain is independent; one chain
+    // exceeding PER_CHAIN_TIMEOUT_MS only loses ITS events, not the page.
+    const results = await Promise.allSettled(SUPPORTED_CHAINS.map(async (chainId) => {
+      const chainStart = Date.now();
+      const chainEvents: GovEvent[] = [];
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(`scan exceeded ${PER_CHAIN_TIMEOUT_MS}ms — partial events discarded`)
+            ),
+          PER_CHAIN_TIMEOUT_MS
+        )
+      );
+      const scanPromise = (async () => {
         const addr = ADDRESSES[chainId];
         const client = publicClient(chainId);
         const { from, to } = await getScanRange(chainId, client);
@@ -356,12 +382,23 @@ export async function scanGovernance(): Promise<GovEvent[]> {
           args: r.args,
         }));
         const withTs = await withBlockTimestamps(client, flat);
-        events.push(...(withTs as unknown as GovEvent[]));
+        chainEvents.push(...(withTs as unknown as GovEvent[]));
+      })();
+      try {
+        await Promise.race([scanPromise, timeoutPromise]);
+        console.info(
+          `governance: chain ${chainId} scanned ${chainEvents.length} events in ${Date.now() - chainStart}ms`
+        );
+        return chainEvents;
       } catch (err) {
-        console.warn(`governance scan for chain ${chainId} failed:`, (err as Error).message);
+        console.warn(`governance scan for chain ${chainId} failed: ${(err as Error).message}`);
+        return [] as GovEvent[];
       }
-    }
+    }));
 
+    for (const r of results) {
+      if (r.status === "fulfilled") events.push(...r.value);
+    }
     return events.sort((a, b) => b.blockTimestamp - a.blockTimestamp);
   });
 }

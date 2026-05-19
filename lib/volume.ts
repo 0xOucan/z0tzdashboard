@@ -5,11 +5,12 @@
  * `bot_pool_snapshots` on the same Turso instance the indexer uses.
  * These helpers aggregate those rows for the /volume dashboard page.
  *
- * The Turso URL + auth token come from env vars on Vercel:
- *   TURSO_DATABASE_URL
- *   TURSO_AUTH_TOKEN
+ * The bot's Turso instance is SEPARATE from the indexer's. Env vars:
+ *   VOLUMEBOT_TURSO_DATABASE_URL
+ *   VOLUMEBOT_TURSO_AUTH_TOKEN
  *
- * Same vars the bot uses on its VPS — one shared DB.
+ * Indexer's TURSO_* vars stay reserved for the indexer pages. The
+ * dashboard can hold both sets without collision.
  */
 import { createClient, type Client } from "@libsql/client";
 
@@ -17,10 +18,10 @@ let _client: Client | null = null;
 
 function client(): Client {
   if (_client) return _client;
-  const url = process.env.TURSO_DATABASE_URL;
-  const authToken = process.env.TURSO_AUTH_TOKEN;
+  const url = process.env.VOLUMEBOT_TURSO_DATABASE_URL;
+  const authToken = process.env.VOLUMEBOT_TURSO_AUTH_TOKEN;
   if (!url || !authToken) {
-    throw new Error("TURSO_DATABASE_URL + TURSO_AUTH_TOKEN required for volume page");
+    throw new Error("VOLUMEBOT_TURSO_DATABASE_URL + VOLUMEBOT_TURSO_AUTH_TOKEN required for volume page");
   }
   _client = createClient({ url, authToken });
   return _client;

@@ -53,9 +53,10 @@ export default async function VolumePage() {
           subtitle="Turso not configured on this dashboard deployment."
         />
         <div className="bg-bg-card border border-border rounded-lg p-6 text-sm text-text-muted">
-          Set <code className="font-mono text-text">TURSO_DATABASE_URL</code> and{" "}
-          <code className="font-mono text-text">TURSO_AUTH_TOKEN</code> on the dashboard's
+          Set <code className="font-mono text-text">VOLUMEBOT_TURSO_DATABASE_URL</code> and{" "}
+          <code className="font-mono text-text">VOLUMEBOT_TURSO_AUTH_TOKEN</code> on the dashboard's
           Vercel env so it can read the bot's <code className="font-mono">bot_*</code> tables.
+          (Indexer's plain <code className="font-mono">TURSO_*</code> vars stay separate.)
         </div>
       </div>
     );

@@ -14,6 +14,7 @@ import {
   Activity,
   TrendingUp,
   ShieldAlert,
+  Zap,
 } from "lucide-react";
 
 const NAV = [
@@ -24,6 +25,7 @@ const NAV = [
   { href: "/defi", label: "DeFi", icon: Coins },
   { href: "/bridge", label: "Bridge", icon: ArrowLeftRight },
   { href: "/analytics", label: "Analytics", icon: TrendingUp },
+  { href: "/volume", label: "Volume Bot", icon: Zap },
   { href: "/health", label: "Health", icon: Activity },
   { href: "/governance", label: "Governance", icon: ShieldAlert },
   { href: "/contracts", label: "Contracts", icon: FileCode2 },

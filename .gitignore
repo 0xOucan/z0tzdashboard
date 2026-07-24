@@ -35,3 +35,7 @@ Thumbs.db
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# stray data exports / scratch
+*.csv
+Untitled
